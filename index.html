@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Matrícula EAP — 3º B.C.</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<div id="login-screen">
+  <div class="login-card">
+    <div style="width:64px;height:64px;border-radius:50%;margin:0 auto 18px;background:radial-gradient(circle at 30% 30%,#e0be6a,#c9a44a 70%);display:flex;align-items:center;justify-content:center;font-weight:800;color:#0a1e33;font-size:18px;border:3px solid rgba(255,255,255,.6)">PM</div>
+    <h2>Matrícula EAP</h2>
+    <p>3º Batalhão de Caçadores — Acesso restrito</p>
+    <div class="login-error" id="login-error"></div>
+    <form id="login-form">
+      <div class="login-field">
+        <label for="login-email">E-mail institucional</label>
+        <input type="email" id="login-email" required placeholder="seuemail@exemplo.com" autocomplete="username">
+      </div>
+      <div class="login-field">
+        <label for="login-password">Senha</label>
+        <input type="password" id="login-password" required placeholder="••••••••" autocomplete="current-password" minlength="6">
+      </div>
+      <button type="submit" class="login-btn" id="login-btn">Entrar</button>
+    </form>
+  </div>
+</div>
+
+<header>
+  <div class="header-wrap">
+    <div class="brand">
+      <div class="badge">PM</div>
+      <div>
+        <h1>Matrícula EAP</h1>
+        <p>3º BATALHÃO DE CAÇADORES • Inscrição de Policiais</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span class="user-email" id="user-email">—</span>
+      <span class="cia-badge" id="cia-badge" style="display:none">—</span>
+      <span class="conn-status" id="conn-status">Verificando...</span>
+      <button class="btn btn-ghost btn-logout" id="btn-logout">Sair</button>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- BARRA DE ANO — acima do card "Nova Matrícula" -->
+  <div class="ano-bar">
+    <label for="ano-select">Ano de Referência</label>
+    <select id="ano-select"></select>
+    <span class="ano-bar-hint">Alterar o ano recarrega turmas, solicitações e log.</span>
+  </div>
+
+  <!-- CARD 1: NOVA MATRÍCULA -->
+  <section class="card">
+    <h2>Nova Matrícula</h2>
+    <p class="sub">Digite o RE de 6 dígitos. Os dados do policial serão buscados automaticamente na base central.</p>
+    <div class="row">
+      <div class="field" style="flex:2">
+        <label for="re-input">RE (6 dígitos)</label>
+        <input type="text" id="re-input" maxlength="6" inputmode="numeric" placeholder="Ex.: 110627" autocomplete="off">
+      </div>
+      <div class="field" style="flex:1;justify-content:flex-end">
+        <button class="btn btn-outline" id="btn-buscar" style="height:42px">Buscar</button>
+      </div>
+    </div>
+    <div id="alert-preview" class="alert"></div>
+    <div id="preview"></div>
+    <div class="row">
+      <div class="field" style="flex:3">
+        <label for="obs-input">Observação (opcional)</label>
+        <input type="text" id="obs-input" placeholder="Ex.: Matrícula realizada por telefone">
+      </div>
+      <div class="field" style="flex:1;justify-content:flex-end">
+        <button class="btn btn-gold" id="btn-matricular" style="height:42px">Confirmar Matrícula</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- CARD 2: TURMAS CRIADAS (apenas turmas NÃO concluídas) -->
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+      <div>
+        <h2>Turmas Criadas — Ano <span id="ano-label">2027</span></h2>
+        <p class="sub" style="margin-bottom:0">
+          Espelho do app <strong>EAP 3º B.C.</strong> — apenas visualização das turmas em andamento.
+        </p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline" id="btn-atualizar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23 4 23 10 17 10"/>
+            <polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+          </svg>
+          Atualizar
+        </button>
+        <button class="btn btn-outline" id="btn-export">Exportar Excel</button>
+      </div>
+    </div>
+
+    <div class="cat-tabs" id="cat-tabs">
+      <button class="cat-tab active" data-cat="cb_sd">Cb/Sd</button>
+      <button class="cat-tab" data-cat="subten_sgt">Subten/Sgt</button>
+      <button class="cat-tab" data-cat="oficiais">Oficiais</button>
+    </div>
+
+    <div class="field" style="margin-bottom:14px">
+      <input type="search" id="search" placeholder="Buscar por RE, nome, Cia/Seção...">
+    </div>
+
+    <div id="turmas-list">
+      <div class="empty">Carregando...</div>
+    </div>
+  </section>
+
+  <!-- CARD 3: TURMAS CONCLUÍDAS — espelho das turmas concluídas no eap3bc -->
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+      <div>
+        <h2>Turmas Concluídas — Ano <span id="ano-label-concl">2027</span></h2>
+        <p class="sub" style="margin-bottom:0">
+          Turmas marcadas como <strong>concluídas</strong> no app EAP 3º B.C. Apenas visualização.
+        </p>
+      </div>
+    </div>
+    <div id="turmas-concluidas-list">
+      <div class="empty">Carregando...</div>
+    </div>
+  </section>
+
+  <!-- CARD 4: MINHAS SOLICITAÇÕES -->
+<section class="card" id="card-solicitacoes">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+    <div>
+      <h2 style="display:flex;align-items:center;gap:10px">
+        Minhas Solicitações — Ano <span id="ano-label-solic">2027</span>
+        <span id="badge-solicitacoes" class="pill pill-amber" style="display:none">0</span>
+      </h2>
+      <p class="sub" style="margin-bottom:0">
+        Transferências e exclusões que você pediu. <strong>Aguardam aprovação do gestor</strong> antes de serem efetivadas.
+      </p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-outline" id="btn-toggle-historico-solic">Ver histórico</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Tipo</th><th>RE</th><th>Policial</th>
+          <th>Turma Atual</th><th>Turma Nova</th>
+          <th>Motivo</th><th>Status</th><th>Enviada em</th>
+          <th style="text-align:right">Detalhes</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-solicitacoes">
+        <tr><td colspan="9" class="empty">Carregando...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+  <!-- CARD 5: LOG DE AUDITORIA -->
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+      <div>
+        <h2>Log de Auditoria — Ano <span id="ano-label-log">2027</span></h2>
+        <p class="sub" style="margin-bottom:0">Histórico de cada ação: quem fez, o que fez, quando e em quem.</p>
+      </div>
+      <button class="btn btn-outline" id="btn-export-log">Exportar Log em Excel</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Data / Hora</th><th>Ação</th><th>RE — Policial</th>
+            <th>Feito por</th><th>Status</th>
+            <th style="text-align:right">Detalhes</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-log">
+          <tr><td colspan="6" class="empty">Carregando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div id="modal-root"></div>
+<div id="toasts"></div>
+
+<script defer src="config.js"></script>
+<script defer src="helpers.js"></script>
+<script defer src="matricula.js"></script>
+
+</body>
+</html>
