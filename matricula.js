@@ -184,10 +184,10 @@ async function checarConexao(){
   try {
     const { error } = await sb.from('policiais').select('re', { count:'exact', head:true }).limit(1);
     if (error) throw error;
-    if (el){ el.textContent = 'Supabase Online'; el.className = 'conn-status online'; }
+    if (el){ el.textContent = 'DB Online'; el.className = 'conn-status online'; }
     return true;
   } catch(err){
-    if (el){ el.textContent = 'Supabase Offline'; el.className = 'conn-status offline'; }
+    if (el){ el.textContent = 'DB Offline'; el.className = 'conn-status offline'; }
     return false;
   }
 }
