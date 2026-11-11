@@ -7,6 +7,8 @@
    - Logs filtrados por Cia/Seção
    - Gestão de Usuários (só admin)
    - CORREÇÃO: deduplicação de logs de auditoria
+   - CORREÇÃO: IAS vencida só quando HÁ data e ela venceu
+              (alinhado com o app EAP 3º B.C.)
    ============================================================ */
 
 let currentYear = 2027;
@@ -246,9 +248,18 @@ function parseISODateFlex(valor){
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
+/**
+ * CORREÇÃO PRINCIPAL:
+ * Retorna `true` SOMENTE quando HÁ uma data de exame E ela venceu.
+ * Quando a data é ausente/inválida, retorna `false`
+ * (alinhado com `isExameVencido` do app EAP 3º B.C.).
+ *
+ * Regra: validade = data do exame + 1 ano.
+ * Vencida se `validade < data de referência`.
+ */
 function iasVencida(dataExame, dataRefISO){
   const exame = parseISODateFlex(dataExame);
-  if (!exame) return true;
+  if (!exame) return false;  // ← sem data = NÃO vencido (antes era true)
 
   const refBase = parseISODateFlex(dataRefISO) || new Date();
   const ref = new Date(refBase.getFullYear(), refBase.getMonth(), refBase.getDate());
@@ -269,8 +280,13 @@ function getCampoIAS(p, tipo){
 
 function calcularStatusBadges(policial, turmaInicioISO, alocacao){
   const p = policial || {};
-  const odontoVencida = iasVencida(getCampoIAS(p, 'odonto'), turmaInicioISO);
-  const medicoVencida = iasVencida(getCampoIAS(p, 'medico'), turmaInicioISO);
+
+  // Só calcula vencimento quando há data preenchida.
+  const odontoRaw = getCampoIAS(p, 'odonto');
+  const medicoRaw = getCampoIAS(p, 'medico');
+
+  const odontoVencida = odontoRaw ? iasVencida(odontoRaw, turmaInicioISO) : false;
+  const medicoVencida = medicoRaw ? iasVencida(medicoRaw, turmaInicioISO) : false;
 
   const notaEAD = alocacao && alocacao.nota_ead;
   const semNotaEAD = !notaEAD || String(notaEAD).trim() === '';
@@ -407,10 +423,6 @@ async function loadLog(){
 
     const raw = data || [];
 
-    // Deduplicação defensiva:
-    // - Para ações de solicitação (ex: solicitacao_aprovada), a chave é acao + solicitacao_id.
-    // - Para ações de matrícula (ex: aprovada), a chave é acao + matricula_id.
-    // - Para as demais (criada, tentativa_duplicada, etc), usa acao + re + created_at.
     const seen = new Map();
     const dedup = [];
     for (const l of raw){
@@ -1457,9 +1469,9 @@ function mostrarDetalhesSolicitacao(id){
       : s.status === 'reprovada'
       ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>'
       : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>';
-    
-    const decDate = s.decidido_em 
-      ? fmtDateTime(s.decidido_em) 
+
+    const decDate = s.decidido_em
+      ? fmtDateTime(s.decidido_em)
       : (s.status === 'cancelada' ? fmtDateTime(s.updated_at || s.created_at) : '—');
 
     decisionHTML = `
@@ -1480,7 +1492,7 @@ function mostrarDetalhesSolicitacao(id){
   }
 
   const envioDate = fmtDateTime(s.created_at);
-  
+
   const timelineHTML = `
     <div class="sol-detail-section">
       <div class="sol-detail-label">Histórico</div>
@@ -1496,10 +1508,10 @@ function mostrarDetalhesSolicitacao(id){
           : 'current'
         }">
           <div class="sol-detail-timeline-time">${
-            s.decidido_em 
+            s.decidido_em
               ? fmtDateTime(s.decidido_em)
-              : (s.status === 'cancelada' && s.updated_at 
-                ? fmtDateTime(s.updated_at) 
+              : (s.status === 'cancelada' && s.updated_at
+                ? fmtDateTime(s.updated_at)
                 : 'Aguardando decisão')
           }</div>
           <div class="sol-detail-timeline-text">${
@@ -1657,7 +1669,7 @@ function mostrarDetalhesLog(l){
   const longos = {};
 
   const ordemPreferencial = ['tipo', 'turma_atual', 'turma_nova'];
-  
+
   if (!DETALHE_OCULTAR.has('turma_numero')) {
     DETALHE_OCULTAR.add('turma_numero');
   }
