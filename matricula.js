@@ -9,6 +9,8 @@
    - CORREÇÃO: deduplicação de logs de auditoria
    - CORREÇÃO: IAS vencida só quando HÁ data e ela venceu
               (alinhado com o app EAP 3º B.C.)
+   - NOVO: rótulo de turma com categoria e período
+           "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
    ============================================================ */
 
 let currentYear = 2027;
@@ -211,6 +213,28 @@ function inferirCategoria(postoGrad){
 }
 
 /* ============================================================
+   NOVO — RÓTULO DA TURMA (com categoria e período)
+   Formato:
+     Turma I - 02/03/2027 - 04/03/2027 - Cb/Sd
+     Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt
+     Turma IX - 03/07/2027 - 05/07/2027 - Oficiais
+   ============================================================ */
+function formatarRotuloTurma(t){
+  if (!t) return '';
+  const numero = String(t.numero || '').trim();
+  const inicio = t.data_inicio ? fmtDate(t.data_inicio) : '';
+  const fim    = t.data_fim    ? fmtDate(t.data_fim)    : '';
+  const cat    = CAT_LABELS[t.categoria] || t.categoria || '';
+
+  const partes = [`Turma ${numero}`];
+  if (inicio) partes.push(inicio);
+  if (fim)    partes.push(fim);
+  if (cat)    partes.push(cat);
+
+  return partes.join(' - ');
+}
+
+/* ============================================================
    IAS — VALIDADE (1 ano a partir do exame)
    ============================================================ */
 function parseISODateFlex(valor){
@@ -249,17 +273,13 @@ function parseISODateFlex(valor){
 }
 
 /**
- * CORREÇÃO PRINCIPAL:
  * Retorna `true` SOMENTE quando HÁ uma data de exame E ela venceu.
  * Quando a data é ausente/inválida, retorna `false`
  * (alinhado com `isExameVencido` do app EAP 3º B.C.).
- *
- * Regra: validade = data do exame + 1 ano.
- * Vencida se `validade < data de referência`.
  */
 function iasVencida(dataExame, dataRefISO){
   const exame = parseISODateFlex(dataExame);
-  if (!exame) return false;  // ← sem data = NÃO vencido (antes era true)
+  if (!exame) return false;
 
   const refBase = parseISODateFlex(dataRefISO) || new Date();
   const ref = new Date(refBase.getFullYear(), refBase.getMonth(), refBase.getDate());
@@ -281,7 +301,6 @@ function getCampoIAS(p, tipo){
 function calcularStatusBadges(policial, turmaInicioISO, alocacao){
   const p = policial || {};
 
-  // Só calcula vencimento quando há data preenchida.
   const odontoRaw = getCampoIAS(p, 'odonto');
   const medicoRaw = getCampoIAS(p, 'medico');
 
@@ -408,11 +427,6 @@ async function loadMatriculas(){
   }
 }
 
-/**
- * CORREÇÃO: carrega o log de auditoria e DEDUPLICA registros
- * que tenham o mesmo (acao + solicitacao_id) ou (acao + matricula_id),
- * evitando que a aprovação de uma solicitação apareça 2x no frontend.
- */
 async function loadLog(){
   if (!sb) return;
   try {
@@ -422,7 +436,6 @@ async function loadLog(){
     if (error) throw error;
 
     const raw = data || [];
-
     const seen = new Map();
     const dedup = [];
     for (const l of raw){
@@ -562,12 +575,30 @@ function renderPreview(){
   const btn = document.getElementById('btn-matricular');
   if (!currentOfficer){ box.innerHTML = ''; btn.disabled = true; return; }
 
+  // ── Matrícula "existente" no sentido de BLOQUEAR nova matrícula ──
+  // Considera-se existente somente se:
+  //   • status = 'confirmada'
+  //   • aprovacao ≠ 'reprovada'
+  //   • turma_id aponta para uma turma que AINDA EXISTE
+  //   • E, além disso, a eap_alocacoes NÃO tenha turma_id = null
+  //     (proteção contra remoção no eap3bc que ainda não refletiu
+  //      em eap_matriculas).
   const matriculaExistente = dbMatriculas.find(m => {
     if (String(m.re) !== String(currentOfficer.re)) return false;
     if (m.ano !== currentYear) return false;
     if (m.status !== 'confirmada') return false;
     if (m.aprovacao === 'reprovada') return false;
+
+    // A turma da matrícula precisa existir
     if (m.turma_id && !dbTurmas.find(t => String(t.id) === String(m.turma_id))) return false;
+
+    // ── DEFESA EM PROFUNDIDADE ────────────────────────────────
+    // Se o eap3bc já removeu o policial da turma (alocação com
+    // turma_id = null), a matrícula não deve mais bloquear.
+    const alocAtual = dbAlocacoes.find(a => String(a.re) === String(currentOfficer.re));
+    if (alocAtual && !alocAtual.turma_id) return false;
+    // ──────────────────────────────────────────────────────────
+
     return true;
   });
 
@@ -635,6 +666,10 @@ function renderPreview(){
   }
 }
 
+/* ============================================================
+   OPÇÕES DE TURMA — MATRÍCULA
+   Exibe: "Turma I - 02/03/2027 - 04/03/2027 - Cb/Sd"
+   ============================================================ */
 function renderTurmaOptions(jaMatriculado = null){
   const sel = document.getElementById('turma-select');
   if (!sel) return { aviso: '', bloqueado: true };
@@ -668,9 +703,9 @@ function renderTurmaOptions(jaMatriculado = null){
 
   const opts = ['<option value="">— Selecione a turma —</option>'];
   turmas.forEach(t => {
-    const dataTxt = t.data_inicio ? ' — ' + fmtDate(t.data_inicio) : '';
+    const rotulo = formatarRotuloTurma(t);
     const selected = jaMatriculado && String(jaMatriculado.turma_id) === String(t.id) ? 'selected' : '';
-    opts.push(`<option value="${t.id}" data-numero="${escapeHTML(t.numero)}" ${selected}>Turma ${escapeHTML(t.numero)}${dataTxt}</option>`);
+    opts.push(`<option value="${t.id}" data-numero="${escapeHTML(t.numero)}" data-categoria="${escapeHTML(t.categoria)}" ${selected}>${escapeHTML(rotulo)}</option>`);
   });
   sel.innerHTML = opts.join('');
   sel.disabled = !!jaMatriculado || bloqueado;
@@ -897,8 +932,6 @@ function renderTurmasForCategory(container, onlyConcluded){
           : 'Turma sem alunos.'}</td></tr>`
       : alunos.map(a => {
           const p = a.policial || {};
-
-          // ✅ Badges consideram IAS + EAD (usa a alocacao para ver nota_ead)
           const badges = calcularStatusBadges(p, t.data_inicio, a.alocacao);
 
           const validadeIAS = p.validade_ias || '';
@@ -1013,6 +1046,8 @@ function renderTurmasConcluidas(){
 
 /* ============================================================
    SOLICITAR TRANSFERÊNCIA
+   - Select com rótulo padronizado:
+       "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
    ============================================================ */
 function abrirModalTransferir(reInput){
   const re = String(reInput);
@@ -1050,11 +1085,13 @@ function abrirModalTransferir(reInput){
     return;
   }
 
+  // Rótulo padronizado: "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
   const turmaOpts = turmasDisponiveis.map(t =>
-    `<option value="${t.id}" data-numero="${escapeHTML(t.numero)}">
-       Turma ${escapeHTML(t.numero)}${t.data_inicio ? ' — ' + fmtDate(t.data_inicio) : ''}
-     </option>`
+    `<option value="${t.id}" data-numero="${escapeHTML(t.numero)}" data-categoria="${escapeHTML(t.categoria)}">${escapeHTML(formatarRotuloTurma(t))}</option>`
   ).join('');
+
+  // Rótulo da turma atual (para o preview)
+  const turmaAtualRotulo = turmaAtual ? formatarRotuloTurma(turmaAtual) : '—';
 
   const alvo = document.getElementById('modal-root') || document.body;
   alvo.innerHTML = `
@@ -1074,7 +1111,10 @@ function abrirModalTransferir(reInput){
               <div class="preview-item"><div class="lbl">RE</div><div class="val">${escapeHTML(re)}${p.dg ? '-' + escapeHTML(p.dg) : ''}</div></div>
               <div class="preview-item"><div class="lbl">Policial</div><div class="val">${escapeHTML(p.nome||'—')}</div></div>
               <div class="preview-item"><div class="lbl">Cia/Seção</div><div class="val">${escapeHTML(p.cia_secao||'—')}</div></div>
-              <div class="preview-item"><div class="lbl">Turma Atual</div><div class="val">${turmaAtual ? 'Turma ' + escapeHTML(turmaAtual.numero) : '—'}</div></div>
+              <div class="preview-item" style="grid-column:1/-1">
+                <div class="lbl">Turma Atual</div>
+                <div class="val">${escapeHTML(turmaAtualRotulo)}</div>
+              </div>
             </div>
           </div>
           <div class="field">
@@ -1136,6 +1176,8 @@ function abrirModalTransferir(reInput){
 
 /* ============================================================
    SOLICITAR EXCLUSÃO
+   - Mostra a turma atual com o MESMO rótulo padronizado
+     "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
    ============================================================ */
 async function solicitarExclusao(reInput){
   if (!sb) { toast('Supabase não configurado.', 'error'); return; }
@@ -1159,6 +1201,7 @@ async function solicitarExclusao(reInput){
   const mat  = dbMatriculas.find(m => String(m.re) === re && m.status === 'confirmada' && m.aprovacao !== 'reprovada');
   const turmaId = aloc?.turma_id || mat?.turma_id || null;
   const turmaAtual = dbTurmas.find(t => String(t.id) === String(turmaId));
+  const turmaAtualRotulo = turmaAtual ? formatarRotuloTurma(turmaAtual) : '—';
 
   const alvo = document.getElementById('modal-root') || document.body;
   alvo.innerHTML = `
@@ -1176,7 +1219,10 @@ async function solicitarExclusao(reInput){
             <div class="preview-grid">
               <div class="preview-item"><div class="lbl">RE</div><div class="val">${escapeHTML(re)}${p.dg ? '-' + escapeHTML(p.dg) : ''}</div></div>
               <div class="preview-item"><div class="lbl">Policial</div><div class="val">${escapeHTML(p.nome||'—')}</div></div>
-              <div class="preview-item"><div class="lbl">Turma Atual</div><div class="val">${turmaAtual ? 'Turma ' + escapeHTML(turmaAtual.numero) : '—'}</div></div>
+              <div class="preview-item" style="grid-column:1/-1">
+                <div class="lbl">Turma Atual</div>
+                <div class="val">${escapeHTML(turmaAtualRotulo)}</div>
+              </div>
             </div>
           </div>
           <div class="field">
