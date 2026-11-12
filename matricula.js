@@ -1,16 +1,13 @@
 /* ============================================================
-   MATRICULA.JS — App de Matrícula (versão consolidada)
-   - Login por usuário institucional (sufixo @policiamilitar.sp.gov.br)
-   - Atualização MANUAL (botão "Atualizar" no header)
-   - Matrícula automática (sem aprovação)
-   - Solicitações (transf./exclusão) passam por aprovação
+   MATRICULA.JS — App de Matrícula (refatorado)
+   - Login por usuário institucional
+   - Matrícula automática + solicitações com aprovação
    - Logs filtrados por Cia/Seção
-   - Gestão de Usuários (só admin)
-   - CORREÇÃO: deduplicação de logs de auditoria
-   - CORREÇÃO: IAS vencida só quando HÁ data e ela venceu
-              (alinhado com o app EAP 3º B.C.)
-   - NOVO: rótulo de turma com categoria e período
-           "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
+   - Gestão de Usuários (admin)
+   - Tabela de turmas: 9 colunas, sem scroll, badges semânticas
+   - Validade IAS: exame + 1 ano deve cobrir a data de TÉRMINO da turma
+   - Status da linha agora lista o motivo específico da pendência
+     (Regularizar IAS Odonto / Regularizar IAS Médico / Concluir EAD)
    ============================================================ */
 
 let currentYear = 2027;
@@ -144,12 +141,6 @@ const ACAO_LABEL = {
   solicitacao_cancelada:     { txt: 'Solicitação cancelada', cls: 'pill-gray'  }
 };
 
-const APROVACAO_LABEL = {
-  pendente:  { txt: 'Pendente',  cls: 'pill-amber' },
-  aprovada:  { txt: 'Aprovada',  cls: 'pill-green' },
-  reprovada: { txt: 'Reprovada', cls: 'pill-red'   }
-};
-
 const SOLIC_LABEL = {
   pendente:  { txt: 'Aguardando gestor', cls: 'pill-amber' },
   aprovada:  { txt: 'Aprovada',          cls: 'pill-green' },
@@ -174,7 +165,7 @@ const DETALHE_LABEL = {
 };
 
 const DETALHE_OCULTAR = new Set(['turma_id', 'solicitacao_id', 'nome', 'turma_numero']);
-const DETALHE_LONGO = new Set(['observacao', 'motivo']);
+const DETALHE_LONGO   = new Set(['observacao', 'motivo']);
 
 function rotuloDetalhe(k){
   return DETALHE_LABEL[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -213,11 +204,7 @@ function inferirCategoria(postoGrad){
 }
 
 /* ============================================================
-   NOVO — RÓTULO DA TURMA (com categoria e período)
-   Formato:
-     Turma I - 02/03/2027 - 04/03/2027 - Cb/Sd
-     Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt
-     Turma IX - 03/07/2027 - 05/07/2027 - Oficiais
+   RÓTULO DA TURMA (com categoria e período)
    ============================================================ */
 function formatarRotuloTurma(t){
   if (!t) return '';
@@ -235,7 +222,9 @@ function formatarRotuloTurma(t){
 }
 
 /* ============================================================
-   IAS — VALIDADE (1 ano a partir do exame)
+   IAS — VALIDADE
+   Regra: validade = data_exame + 1 ano. A IAS é considerada
+   válida para a turma quando a validade >= data_fim da turma.
    ============================================================ */
 function parseISODateFlex(valor){
   if (valor === null || valor === undefined || valor === '') return null;
@@ -272,11 +261,30 @@ function parseISODateFlex(valor){
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
-/**
- * Retorna `true` SOMENTE quando HÁ uma data de exame E ela venceu.
- * Quando a data é ausente/inválida, retorna `false`
- * (alinhado com `isExameVencido` do app EAP 3º B.C.).
- */
+function getCampoIAS(p, tipo){
+  if (!p) return null;
+  if (tipo === 'odonto'){
+    return p.ias_odonto ?? p.iasOdonto ?? null;
+  }
+  return p.ias_medico ?? p.ias_medica ?? p.iasMedico ?? null;
+}
+
+/** Retorna a data de vencimento (exame + 1 ano) ou null. */
+function validadeDeExame(examDate){
+  const d = parseISODateFlex(examDate);
+  if (!d) return null;
+  const v = new Date(d.getTime());
+  v.setFullYear(v.getFullYear() + 1);
+  return v;
+}
+
+/** Formata Date em pt-BR (seguro para timezone local). */
+function dateBR(d){
+  if (!d) return '—';
+  return d.toLocaleDateString('pt-BR');
+}
+
+/** Compatibilidade: exam + 1 ano < referência → vencida. */
 function iasVencida(dataExame, dataRefISO){
   const exame = parseISODateFlex(dataExame);
   if (!exame) return false;
@@ -290,34 +298,151 @@ function iasVencida(dataExame, dataRefISO){
   return validade.getTime() < ref.getTime();
 }
 
-function getCampoIAS(p, tipo){
-  if (!p) return null;
-  if (tipo === 'odonto'){
-    return p.ias_odonto ?? p.iasOdonto ?? null;
-  }
-  return p.ias_medico ?? p.ias_medica ?? p.iasMedico ?? null;
+/**
+ * Verifica se AMBAS as IAS estão válidas até a data de término da turma.
+ * Sem data de término na turma → usa a data de hoje como referência.
+ * Se nenhuma IAS estiver informada → considera válida (não bloqueia).
+ * Se uma estiver informada e vencida → inválida.
+ */
+function isIASValida(p, turma){
+  const odontoVal = validadeDeExame(getCampoIAS(p, 'odonto'));
+  const medicoVal = validadeDeExame(getCampoIAS(p, 'medico'));
+
+  if (!odontoVal && !medicoVal) return true;
+
+  const dataFim = turma?.data_fim ? parseISODateFlex(turma.data_fim) : null;
+  const refDate = dataFim || (() => {
+    const h = new Date(); h.setHours(0,0,0,0); return h;
+  })();
+
+  if (odontoVal && odontoVal.getTime() < refDate.getTime()) return false;
+  if (medicoVal && medicoVal.getTime() < refDate.getTime()) return false;
+
+  return true;
 }
 
-function calcularStatusBadges(policial, turmaInicioISO, alocacao){
-  const p = policial || {};
+function isEADConcluido(aloc){
+  return !!(aloc && aloc.nota_ead && aloc.data_conclusao_ead);
+}
 
+/* ─── Badge da coluna EAD ────────────────────────────────── */
+function renderEADBadge(aloc){
+  const nota  = (aloc && aloc.nota_ead)            || '';
+  const dataC = (aloc && aloc.data_conclusao_ead)  || '';
+
+  if (nota && dataC){
+    return `<span class="pill pill-green" title="EAD concluído"><strong>${escapeHTML(nota)}</strong> · ${fmtDate(dataC)}</span>`;
+  }
+  if (nota){
+    return `<span class="pill pill-red" title="Nota registrada, mas conclusão pendente">${escapeHTML(nota)} · pendente</span>`;
+  }
+  if (dataC){
+    return `<span class="pill pill-red" title="Conclusão registrada, mas sem nota">Sem nota</span>`;
+  }
+  return `<span class="pill pill-red" title="EAD não concluído">Pendente</span>`;
+}
+
+/**
+ * Badge da coluna "Validade IAS".
+ * - verde: as duas IAS válidas até o término da turma → mostra a MENOR validade
+ * - vermelho: alguma IAS vencida antes do término → tooltip indica qual
+ * - âmbar: dados ausentes/incompletos
+ */
+function renderIASBadge(p, turma){
+  const odontoVal = validadeDeExame(getCampoIAS(p, 'odonto'));
+  const medicoVal = validadeDeExame(getCampoIAS(p, 'medico'));
+
+  if (!odontoVal && !medicoVal){
+    return `<span class="pill pill-amber" title="IAS não informada">—</span>`;
+  }
+
+  const dataFim = turma?.data_fim ? parseISODateFlex(turma.data_fim) : null;
+  const refDate = dataFim || (() => {
+    const h = new Date(); h.setHours(0,0,0,0); return h;
+  })();
+
+  const odontoOK = odontoVal ? odontoVal.getTime() >= refDate.getTime() : null;
+  const medicoOK = medicoVal ? medicoVal.getTime() >= refDate.getTime() : null;
+
+  // Ambas válidas
+  if (odontoOK === true && medicoOK === true){
+    const earliest = odontoVal.getTime() <= medicoVal.getTime() ? odontoVal : medicoVal;
+    const title = `IAS Odonto vence em ${dateBR(odontoVal)} • IAS Médica vence em ${dateBR(medicoVal)}`;
+    return `<span class="pill pill-green" title="${escapeHTML(title)}">${dateBR(earliest)}</span>`;
+  }
+
+  // Pelo menos uma vencida
+  if (odontoOK === false || medicoOK === false){
+    const detalhes = [];
+    if (odontoOK === false) detalhes.push(`Odonto venceu em ${dateBR(odontoVal)}`);
+    if (medicoOK === false) detalhes.push(`Médica venceu em ${dateBR(medicoVal)}`);
+    const title = `IAS vencida antes do término da turma — ${detalhes.join(' / ')}`;
+    return `<span class="pill pill-red" title="${escapeHTML(title)}">Vencida</span>`;
+  }
+
+  // Parcial: uma informada e válida, outra ausente
+  const faltando = [];
+  if (!odontoVal) faltando.push('Odonto');
+  if (!medicoVal) faltando.push('Médica');
+  const title = `IAS ${faltando.join(' e ')} não informada`;
+  return `<span class="pill pill-amber" title="${escapeHTML(title)}">Incompleta</span>`;
+}
+
+/**
+ * Retorna a lista textual de pendências (uma string por motivo),
+ * usada pela coluna Status. Cada item corresponde a uma pill vermelha.
+ */
+function getPendenciasBadge(p, aloc, turma){
+  const odontoVal = validadeDeExame(getCampoIAS(p, 'odonto'));
+  const medicoVal = validadeDeExame(getCampoIAS(p, 'medico'));
+
+  const dataFim = turma?.data_fim ? parseISODateFlex(turma.data_fim) : null;
+  const refDate = dataFim || (() => {
+    const h = new Date(); h.setHours(0,0,0,0); return h;
+  })();
+
+  const pendencias = [];
+  if (odontoVal && odontoVal.getTime() < refDate.getTime()) pendencias.push('Regularizar IAS Odonto');
+  if (medicoVal && medicoVal.getTime() < refDate.getTime()) pendencias.push('Regularizar IAS Médico');
+  if (!isEADConcluido(aloc))                                pendencias.push('Concluir EAD');
+  return pendencias;
+}
+
+/**
+ * Status da linha (Aprovada ou pendências específicas).
+ * - Sem pendências → pill verde "Aprovada"
+ * - Com pendências → uma pill vermelha por motivo:
+ *     "Regularizar IAS Odonto" / "Regularizar IAS Médico" / "Concluir EAD"
+ */
+function renderStatusBadge(p, aloc, turma){
+  const pendencias = getPendenciasBadge(p, aloc, turma);
+
+  if (pendencias.length === 0){
+    return `<span class="pill pill-green" title="Todos os requisitos atendidos">Aprovada</span>`;
+  }
+
+  return pendencias
+    .map(txt => `<span class="pill pill-red" title="${escapeHTML(txt)}">${escapeHTML(txt)}</span>`)
+    .join(' ');
+}
+
+/**
+ * Compatibilidade com exportação Excel.
+ * `turmaRefISO` deve ser a DATA DE TÉRMINO da turma.
+ */
+function calcularStatusBadges(policial, turmaRefISO, alocacao){
+  const p = policial || {};
   const odontoRaw = getCampoIAS(p, 'odonto');
   const medicoRaw = getCampoIAS(p, 'medico');
-
-  const odontoVencida = odontoRaw ? iasVencida(odontoRaw, turmaInicioISO) : false;
-  const medicoVencida = medicoRaw ? iasVencida(medicoRaw, turmaInicioISO) : false;
-
-  const notaEAD = alocacao && alocacao.nota_ead;
-  const semNotaEAD = !notaEAD || String(notaEAD).trim() === '';
+  const odontoVencida = odontoRaw ? iasVencida(odontoRaw, turmaRefISO) : false;
+  const medicoVencida = medicoRaw ? iasVencida(medicoRaw, turmaRefISO) : false;
+  const semNotaEAD = !(alocacao && alocacao.nota_ead && String(alocacao.nota_ead).trim());
 
   const badges = [];
-  if (odontoVencida) badges.push({ txt: 'Regularizar IAS Odonto', cls: 'pill-red'   });
-  if (medicoVencida) badges.push({ txt: 'Regularizar IAS Médica', cls: 'pill-red'   });
+  if (odontoVencida) badges.push({ txt: 'Regularizar IAS Odonto', cls: 'pill-red' });
+  if (medicoVencida) badges.push({ txt: 'Regularizar IAS Médico', cls: 'pill-red' });
   if (semNotaEAD)    badges.push({ txt: 'Concluir EAD',           cls: 'pill-amber' });
-
-  if (badges.length === 0){
-    badges.push({ txt: 'Aprovada', cls: 'pill-green' });
-  }
+  if (badges.length === 0) badges.push({ txt: 'Aprovada', cls: 'pill-green' });
   return badges;
 }
 
@@ -361,19 +486,11 @@ function popularAno(){
       const el = document.getElementById(id);
       if (el) el.textContent = currentYear;
     });
-    dbMatriculas = [];
-    dbAlocacoes = [];
-    dbLog = [];
-    dbTurmas = [];
-    dbSolicitacoes = [];
-    renderTurmasComAlunos();
-    renderTurmasConcluidas();
-    renderMinhasSolicitacoes();
-    renderLog();
-    await loadTurmas();
-    await loadMatriculas();
-    await loadLog();
-    await loadMinhasSolicitacoes();
+    dbMatriculas = []; dbAlocacoes = []; dbLog = []; dbTurmas = []; dbSolicitacoes = [];
+    renderTurmasComAlunos(); renderTurmasConcluidas();
+    renderMinhasSolicitacoes(); renderLog();
+    await loadTurmas(); await loadMatriculas();
+    await loadLog(); await loadMinhasSolicitacoes();
   });
 }
 
@@ -436,18 +553,13 @@ async function loadLog(){
     if (error) throw error;
 
     const raw = data || [];
-    const seen = new Map();
-    const dedup = [];
+    const seen = new Map(); const dedup = [];
     for (const l of raw){
       const det = l.detalhes || {};
       let key;
-      if (det.solicitacao_id){
-        key = `${l.acao}|sol|${det.solicitacao_id}`;
-      } else if (det.matricula_id){
-        key = `${l.acao}|mat|${det.matricula_id}`;
-      } else {
-        key = `${l.acao}|re|${l.re || ''}|${l.created_at || ''}`;
-      }
+      if (det.solicitacao_id)      key = `${l.acao}|sol|${det.solicitacao_id}`;
+      else if (det.matricula_id)   key = `${l.acao}|mat|${det.matricula_id}`;
+      else                         key = `${l.acao}|re|${l.re || ''}|${l.created_at || ''}`;
       if (seen.has(key)) continue;
       seen.set(key, true);
       dedup.push(l);
@@ -463,18 +575,11 @@ async function loadLog(){
 }
 
 async function loadMinhasSolicitacoes(){
-  if (!sb || !currentUser) {
-    dbSolicitacoes = [];
-    renderMinhasSolicitacoes();
-    return;
-  }
+  if (!sb || !currentUser) { dbSolicitacoes = []; renderMinhasSolicitacoes(); return; }
   try {
     const { data, error } = await sb.from('eap_solicitacoes')
-      .select('*')
-      .eq('ano', currentYear)
-      .eq('solicitado_por', currentUser.id)
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .select('*').eq('ano', currentYear).eq('solicitado_por', currentUser.id)
+      .order('created_at', { ascending: false }).limit(50);
     if (error) throw error;
     dbSolicitacoes = data || [];
     renderMinhasSolicitacoes();
@@ -486,20 +591,17 @@ async function loadMinhasSolicitacoes(){
 }
 
 async function atualizarTudo(){
-  const btnHeader = document.getElementById('btn-refresh');
-  if (btnHeader) btnHeader.classList.add('spinning');
-
+  const btn = document.getElementById('btn-refresh');
+  if (btn) btn.classList.add('spinning');
   try {
-    await loadTurmas();
-    await loadMatriculas();
-    await loadLog();
-    await loadMinhasSolicitacoes();
+    await loadTurmas(); await loadMatriculas();
+    await loadLog(); await loadMinhasSolicitacoes();
     if (currentOfficer){ try { renderPreview(); } catch(_){} }
     toast('Dados atualizados do servidor.', 'success');
   } catch(e){
     toast('Falha ao atualizar: ' + (e.message||e), 'error');
   } finally {
-    if (btnHeader) btnHeader.classList.remove('spinning');
+    if (btn) btn.classList.remove('spinning');
   }
 }
 
@@ -510,7 +612,6 @@ let __buscaReqId = 0;
 
 async function buscarPorRE(re){
   const reqId = ++__buscaReqId;
-
   currentOfficer = null;
   const alertEl = document.getElementById('alert-preview');
   alertEl.className = 'alert';
@@ -575,37 +676,20 @@ function renderPreview(){
   const btn = document.getElementById('btn-matricular');
   if (!currentOfficer){ box.innerHTML = ''; btn.disabled = true; return; }
 
-  // ── Matrícula "existente" no sentido de BLOQUEAR nova matrícula ──
-  // Considera-se existente somente se:
-  //   • status = 'confirmada'
-  //   • aprovacao ≠ 'reprovada'
-  //   • turma_id aponta para uma turma que AINDA EXISTE
-  //   • E, além disso, a eap_alocacoes NÃO tenha turma_id = null
-  //     (proteção contra remoção no eap3bc que ainda não refletiu
-  //      em eap_matriculas).
   const matriculaExistente = dbMatriculas.find(m => {
     if (String(m.re) !== String(currentOfficer.re)) return false;
     if (m.ano !== currentYear) return false;
     if (m.status !== 'confirmada') return false;
     if (m.aprovacao === 'reprovada') return false;
-
-    // A turma da matrícula precisa existir
     if (m.turma_id && !dbTurmas.find(t => String(t.id) === String(m.turma_id))) return false;
-
-    // ── DEFESA EM PROFUNDIDADE ────────────────────────────────
-    // Se o eap3bc já removeu o policial da turma (alocação com
-    // turma_id = null), a matrícula não deve mais bloquear.
     const alocAtual = dbAlocacoes.find(a => String(a.re) === String(currentOfficer.re));
     if (alocAtual && !alocAtual.turma_id) return false;
-    // ──────────────────────────────────────────────────────────
-
     return true;
   });
 
   const matriculaReprovada = dbMatriculas.find(m =>
     String(m.re) === String(currentOfficer.re) &&
-    m.ano === currentYear &&
-    m.aprovacao === 'reprovada'
+    m.ano === currentYear && m.aprovacao === 'reprovada'
   );
 
   const alocExistente = dbAlocacoes.find(a =>
@@ -615,6 +699,14 @@ function renderPreview(){
     ? dbTurmas.find(t => String(t.id) === String(alocExistente.turma_id))
     : null;
 
+  // Calcula validades individuais para exibir no preview
+  const valOdo = validadeDeExame(currentOfficer.dataExameOdonto);
+  const valMed = validadeDeExame(currentOfficer.dataExameMedico);
+  const valEfetiva = (() => {
+    if (valOdo && valMed) return valOdo.getTime() <= valMed.getTime() ? valOdo : valMed;
+    return valOdo || valMed || null;
+  })();
+
   box.innerHTML = `
     <div class="preview">
       <div class="preview-grid">
@@ -623,9 +715,15 @@ function renderPreview(){
         <div class="preview-item"><div class="lbl">Nome</div><div class="val">${escapeHTML(currentOfficer.nome||'—')}</div></div>
         <div class="preview-item"><div class="lbl">Cia/Seção</div><div class="val">${escapeHTML(currentOfficer.ciaSecao||'—')}</div></div>
         <div class="preview-item"><div class="lbl">Nascimento</div><div class="val">${currentOfficer.dataNascimento ? fmtDate(currentOfficer.dataNascimento) : '—'}</div></div>
-        <div class="preview-item"><div class="lbl">Validade IAS</div><div class="val">${currentOfficer.validadeIAS ? fmtDate(currentOfficer.validadeIAS) : '—'}</div></div>
-        <div class="preview-item"><div class="lbl">IAS Odonto</div><div class="val">${currentOfficer.dataExameOdonto ? fmtDate(currentOfficer.dataExameOdonto) : '—'}</div></div>
-        <div class="preview-item"><div class="lbl">IAS Médica</div><div class="val">${currentOfficer.dataExameMedico ? fmtDate(currentOfficer.dataExameMedico) : '—'}</div></div>
+        <div class="preview-item"><div class="lbl">Validade IAS</div><div class="val">${valEfetiva ? dateBR(valEfetiva) : '—'}</div></div>
+        <div class="preview-item">
+          <div class="lbl">IAS Odonto</div>
+          <div class="val">${currentOfficer.dataExameOdonto ? `${fmtDate(currentOfficer.dataExameOdonto)}${valOdo ? ` <small style="color:var(--g500)">(vence ${dateBR(valOdo)})</small>` : ''}` : '—'}</div>
+        </div>
+        <div class="preview-item">
+          <div class="lbl">IAS Médica</div>
+          <div class="val">${currentOfficer.dataExameMedico ? `${fmtDate(currentOfficer.dataExameMedico)}${valMed ? ` <small style="color:var(--g500)">(vence ${dateBR(valMed)})</small>` : ''}` : '—'}</div>
+        </div>
       </div>
       <div class="field" style="margin-top:14px;width:100%">
         <label for="turma-select">Turma Desejada <span style="color:var(--red)">*</span></label>
@@ -636,11 +734,9 @@ function renderPreview(){
   const { aviso, bloqueado } = renderTurmaOptions(matriculaExistente);
 
   if (matriculaExistente){
-    if (matriculaExistente.aprovacao === 'aprovada'){
-      alertEl.innerHTML = `Este policial <strong>já está matriculado e APROVADO</strong> (Turma ${escapeHTML(matriculaExistente.turma_numero || '—')}).`;
-    } else {
-      alertEl.innerHTML = `Este policial <strong>já está matriculado</strong>, aguardando aprovação (Turma ${escapeHTML(matriculaExistente.turma_numero || '—')}).`;
-    }
+    alertEl.innerHTML = matriculaExistente.aprovacao === 'aprovada'
+      ? `Este policial <strong>já está matriculado e APROVADO</strong> (Turma ${escapeHTML(matriculaExistente.turma_numero || '—')}).`
+      : `Este policial <strong>já está matriculado</strong>, aguardando aprovação (Turma ${escapeHTML(matriculaExistente.turma_numero || '—')}).`;
     alertEl.className = 'alert alert-warn show';
     btn.disabled = true;
   } else if (alocExistente && turmaAloc){
@@ -666,14 +762,9 @@ function renderPreview(){
   }
 }
 
-/* ============================================================
-   OPÇÕES DE TURMA — MATRÍCULA
-   Exibe: "Turma I - 02/03/2027 - 04/03/2027 - Cb/Sd"
-   ============================================================ */
 function renderTurmaOptions(jaMatriculado = null){
   const sel = document.getElementById('turma-select');
   if (!sel) return { aviso: '', bloqueado: true };
-
   if (!currentOfficer){
     sel.innerHTML = '<option value="">— Busque um policial primeiro —</option>';
     sel.disabled = true;
@@ -682,18 +773,14 @@ function renderTurmaOptions(jaMatriculado = null){
 
   const categoria = inferirCategoria(currentOfficer.postoGrad);
   let turmas = dbTurmas.filter(t => t.categoria === categoria && !t.concluida);
-  let aviso = '';
-  let bloqueado = false;
+  let aviso = ''; let bloqueado = false;
 
   if (turmas.length === 0){
     const todas = dbTurmas.filter(t => !t.concluida);
     if (todas.length === 0){
       sel.innerHTML = '<option value="">— Nenhuma turma aberta —</option>';
       sel.disabled = true;
-      return {
-        aviso: `Nenhuma turma aberta cadastrada no ano ${currentYear}.`,
-        bloqueado: true
-      };
+      return { aviso: `Nenhuma turma aberta cadastrada no ano ${currentYear}.`, bloqueado: true };
     }
     turmas = todas;
     aviso = `Nenhuma turma de ${CAT_LABELS[categoria] || categoria} disponível. Mostrando todas as turmas abertas.`;
@@ -709,12 +796,11 @@ function renderTurmaOptions(jaMatriculado = null){
   });
   sel.innerHTML = opts.join('');
   sel.disabled = !!jaMatriculado || bloqueado;
-
   return { aviso, bloqueado };
 }
 
 /* ============================================================
-   MATRICULAR — AUTOMÁTICA (sem aprovação)
+   MATRICULAR — AUTOMÁTICA
    ============================================================ */
 async function matricular(){
   if (!currentOfficer){
@@ -728,7 +814,6 @@ async function matricular(){
   }
   if (!sb){ toast('Supabase não configurado.', 'error'); return; }
   if (!currentUser){ toast('Faça login primeiro.', 'error'); return; }
-
   if (!policialMatchesUserCia(currentOfficer)){
     toast(`Policial não pertence à ${currentUserCia?.label || 'sua Cia/Seção'}.`, 'error');
     return;
@@ -750,7 +835,6 @@ async function matricular(){
 
   try {
     const agora = new Date().toISOString();
-
     const { error } = await sb.from('eap_matriculas').insert({
       re: String(currentOfficer.re),
       ano: currentYear,
@@ -768,8 +852,7 @@ async function matricular(){
         await registrarTentativa(currentOfficer.re, currentYear, 'tentativa_duplicada',
           { nome: currentOfficer.nome || '', observacao: obs, turma_numero: turmaNumero });
         toast('Este policial já está matriculado neste ano.', 'error');
-        await loadMatriculas();
-        await loadLog();
+        await loadMatriculas(); await loadLog();
         return;
       }
       throw error;
@@ -778,11 +861,8 @@ async function matricular(){
     try {
       const { data: alocExist } = await sb.from('eap_alocacoes')
         .select('*').eq('re', String(currentOfficer.re)).eq('ano', currentYear).maybeSingle();
-
       const alocPayload = {
-        re: String(currentOfficer.re),
-        ano: currentYear,
-        turma_id: turmaId,
+        re: String(currentOfficer.re), ano: currentYear, turma_id: turmaId,
         categoria: (alocExist && alocExist.categoria) || inferirCategoria(currentOfficer.postoGrad),
         taf: (alocExist && alocExist.taf) || 'III',
         taf_iv_tipo: (alocExist && alocExist.taf_iv_tipo) || '',
@@ -794,21 +874,12 @@ async function matricular(){
         ordem_manual: (alocExist && alocExist.ordem_manual) || null,
         updated_at: agora
       };
-
       const { error: alocErr } = await sb.from('eap_alocacoes')
         .upsert(alocPayload, { onConflict: 're,ano' });
       if (alocErr) console.warn('[matricular] falha alocação:', alocErr);
     } catch(allocEx){
       console.warn('[matricular] exceção alocação:', allocEx);
     }
-
-    await registrarTentativa(currentOfficer.re, currentYear, 'criada', {
-      nome: currentOfficer.nome || '',
-      turma_id: turmaId,
-      turma_numero: turmaNumero,
-      observacao: obs,
-      automatica: true
-    });
 
     toast(`Matrícula de ${currentOfficer.nome} (Turma ${turmaNumero}) realizada com sucesso!`, 'success');
 
@@ -818,8 +889,7 @@ async function matricular(){
     document.getElementById('preview').innerHTML = '';
     document.getElementById('alert-preview').className = 'alert';
 
-    await loadMatriculas();
-    await loadLog();
+    await loadMatriculas(); await loadLog();
   } catch(err){
     console.error(err);
     toast('Falha ao matricular: ' + (err.message || err), 'error');
@@ -830,7 +900,7 @@ async function matricular(){
 }
 
 /* ============================================================
-   TURMAS — RENDERIZAÇÃO
+   TURMAS — RENDERIZAÇÃO (9 COLUNAS · SEM SCROLL)
    ============================================================ */
 function renderTurmasForCategory(container, onlyConcluded){
   if (!container) return;
@@ -845,11 +915,7 @@ function renderTurmasForCategory(container, onlyConcluded){
     const sub = onlyConcluded
       ? 'As turmas são marcadas como concluídas pelo gestor no app EAP 3º B.C.'
       : 'A criação de turmas é feita pelo gestor no app EAP 3º B.C.';
-    container.innerHTML = `
-      <div class="empty">
-        <strong>${titulo}</strong><br>
-        <small style="color:var(--g500)">${sub}</small>
-      </div>`;
+    container.innerHTML = `<div class="empty"><strong>${titulo}</strong><br><small style="color:var(--g500)">${sub}</small></div>`;
     return;
   }
 
@@ -902,7 +968,6 @@ function renderTurmasForCategory(container, onlyConcluded){
     });
 
   const turmasOrdenadas = turmasCat.slice().sort((a,b) => romanToInt(a.numero) - romanToInt(b.numero));
-
   const turmasFiltradas = q
     ? turmasOrdenadas.filter(t => {
         const m = porTurma.get(String(t.id));
@@ -932,51 +997,51 @@ function renderTurmasForCategory(container, onlyConcluded){
           : 'Turma sem alunos.'}</td></tr>`
       : alunos.map(a => {
           const p = a.policial || {};
-          const badges = calcularStatusBadges(p, t.data_inicio, a.alocacao);
+          const aloc = a.alocacao || null;
+          const observacao = (a.matricula && a.matricula.observacao) || '';
 
-          const validadeIAS = p.validade_ias || '';
-          const notaEAD      = (a.alocacao && a.alocacao.nota_ead) || '';
-          const dataConclEAD = (a.alocacao && a.alocacao.data_conclusao_ead) || '';
+          const posto   = escapeHTML(p.posto_grad || '—');
+          const reFmt   = `${escapeHTML(a.re)}${p.dg ? '-' + escapeHTML(p.dg) : ''}`;
+          const nome    = escapeHTML(p.nome || '—');
+          const cia     = escapeHTML(p.cia_secao || '—');
+
+          const statusBadge = renderStatusBadge(p, aloc, t);
+          const iasBadge    = renderIASBadge(p, t);
+          const eadBadge    = renderEADBadge(aloc);
+
+          const obsCell = observacao
+            ? `<span class="obs-text" title="${escapeHTML(observacao)}">${escapeHTML(observacao)}</span>`
+            : '<span class="cell-muted">—</span>';
 
           const actionsCell = t.concluida
-            ? `<td style="text-align:right"><span class="cell-muted">—</span></td>`
-            : `<td style="text-align:right">
-                 <button class="btn btn-outline btn-sm" data-transf-re="${escapeHTML(a.re)}" title="Solicitar transferência (aprovação do gestor)">
-                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            ? `<span class="cell-muted">—</span>`
+            : `<div class="actions-wrap">
+                 <button class="btn-action transf" data-transf-re="${escapeHTML(a.re)}" title="Solicitação Transferência">
+                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                      <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/>
                      <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
                    </svg>
-                   Solicitar Transferência
+                   <span>Transferir</span>
                  </button>
-                 <button class="btn btn-outline btn-sm btn-excluir" data-excluir-re="${escapeHTML(a.re)}" title="Solicitar exclusão (aprovação do gestor)">
-                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                 <button class="btn-action excl" data-excluir-re="${escapeHTML(a.re)}" title="Solicitar Exclusão">
+                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                      <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m2 0v14a2 2 0 01-2 2H8a2 2 0 01-2-2V6h12z"/>
                    </svg>
-                   Solicitar Exclusão
+                   <span>Excluir</span>
                  </button>
-               </td>`;
-
-          const badgesHTML = badges
-            .map(b => `<span class="pill ${b.cls}" style="display:inline-block;margin:0">${b.txt}</span>`)
-            .join('');
-
-          const titulo = `IAS Odonto: ${p.ias_odonto || '—'} • IAS Médica: ${(p.ias_medico ?? p.ias_medica) || '—'} • Início Turma: ${t.data_inicio || '—'} • Nota EAD: ${notaEAD || '—'}`;
+               </div>`;
 
           return `
             <tr>
-              <td class="cell-re">${escapeHTML(a.re)}${p.dg ? '-' + escapeHTML(p.dg) : ''}</td>
-              <td>${escapeHTML(p.posto_grad||'—')}</td>
-              <td>${escapeHTML(p.nome||'—')}</td>
-              <td>${escapeHTML(p.cia_secao||'—')}</td>
-              <td>
-                <div style="display:flex;flex-wrap:wrap;gap:4px" title="${escapeHTML(titulo)}">
-                  ${badgesHTML}
-                </div>
-              </td>
-              <td class="cell-muted">${validadeIAS ? fmtDate(validadeIAS) : '—'}</td>
-              <td class="cell-muted">${notaEAD ? escapeHTML(notaEAD) : '—'}</td>
-              <td class="cell-muted">${dataConclEAD ? fmtDate(dataConclEAD) : '—'}</td>
-              ${actionsCell}
+              <td data-label="Posto/Grad" class="cell-posto">${posto}</td>
+              <td data-label="RE" class="cell-re">${reFmt}</td>
+              <td data-label="Nome" class="cell-nome" title="${nome}">${nome}</td>
+              <td data-label="Cia/Seção" class="cell-cia">${cia}</td>
+              <td data-label="Status" class="cell-status">${statusBadge}</td>
+              <td data-label="Validade IAS" class="cell-ias">${iasBadge}</td>
+              <td data-label="EAD" class="cell-ead">${eadBadge}</td>
+              <td data-label="Observações" class="cell-obs">${obsCell}</td>
+              <td data-label="Ações" class="cell-actions">${actionsCell}</td>
             </tr>`;
         }).join('');
 
@@ -998,18 +1063,22 @@ function renderTurmasForCategory(container, onlyConcluded){
           <div class="turma-visual-count">${alunos.length} ${alunos.length === 1 ? 'policial' : 'policiais'}</div>
         </div>
         <div class="turma-visual-body">
-          <div style="overflow-x:auto">
-            <table>
-              <thead>
-                <tr>
-                  <th>RE</th><th>Posto/Grad</th><th>Nome</th><th>Cia/Seção</th>
-                  <th>Status</th><th>Validade IAS</th><th>Nota EAD</th><th>Conclusão EAD</th>
-                  <th style="text-align:right">Ações</th>
-                </tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
+          <table class="turma-table">
+            <thead>
+              <tr>
+                <th>Posto/Grad</th>
+                <th>RE</th>
+                <th>Nome</th>
+                <th>Cia/Seção</th>
+                <th>Status</th>
+                <th>Validade IAS</th>
+                <th>EAD</th>
+                <th>Observações</th>
+                <th style="text-align:right">Ações</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
         </div>
       </div>`;
   }).join('');
@@ -1035,36 +1104,26 @@ function renderTurmasForCategory(container, onlyConcluded){
 }
 
 function renderTurmasComAlunos(){
-  const container = document.getElementById('turmas-list');
-  renderTurmasForCategory(container, false);
+  renderTurmasForCategory(document.getElementById('turmas-list'), false);
 }
 
 function renderTurmasConcluidas(){
-  const container = document.getElementById('turmas-concluidas-list');
-  renderTurmasForCategory(container, true);
+  renderTurmasForCategory(document.getElementById('turmas-concluidas-list'), true);
 }
 
 /* ============================================================
    SOLICITAR TRANSFERÊNCIA
-   - Select com rótulo padronizado:
-       "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
    ============================================================ */
 function abrirModalTransferir(reInput){
   const re = String(reInput);
   const p = dbPoliciais[re] || {};
 
-  if (!policialMatchesUserCia(p)){
-    toast('Este policial não pertence à sua Cia/Seção.', 'error');
-    return;
-  }
+  if (!policialMatchesUserCia(p)){ toast('Este policial não pertence à sua Cia/Seção.', 'error'); return; }
 
   const jaPendente = dbSolicitacoes.find(s =>
     String(s.re) === re && s.status === 'pendente' && s.tipo === 'transferencia'
   );
-  if (jaPendente){
-    toast('Já existe uma solicitação de transferência pendente para este RE.', 'error');
-    return;
-  }
+  if (jaPendente){ toast('Já existe uma solicitação de transferência pendente para este RE.', 'error'); return; }
 
   const aloc = dbAlocacoes.find(a => String(a.re) === re && a.turma_id);
   const mat  = dbMatriculas.find(m => String(m.re) === re && m.status === 'confirmada' && m.aprovacao !== 'reprovada');
@@ -1073,11 +1132,7 @@ function abrirModalTransferir(reInput){
   const categoria = turmaAtual?.categoria || inferirCategoria(p.posto_grad);
 
   const turmasDisponiveis = dbTurmas
-    .filter(t =>
-      t.categoria === categoria &&
-      !t.concluida &&
-      String(t.id) !== String(turmaAtualId)
-    )
+    .filter(t => t.categoria === categoria && !t.concluida && String(t.id) !== String(turmaAtualId))
     .sort((a,b) => romanToInt(a.numero) - romanToInt(b.numero));
 
   if (turmasDisponiveis.length === 0){
@@ -1085,12 +1140,9 @@ function abrirModalTransferir(reInput){
     return;
   }
 
-  // Rótulo padronizado: "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
   const turmaOpts = turmasDisponiveis.map(t =>
     `<option value="${t.id}" data-numero="${escapeHTML(t.numero)}" data-categoria="${escapeHTML(t.categoria)}">${escapeHTML(formatarRotuloTurma(t))}</option>`
   ).join('');
-
-  // Rótulo da turma atual (para o preview)
   const turmaAtualRotulo = turmaAtual ? formatarRotuloTurma(turmaAtual) : '—';
 
   const alvo = document.getElementById('modal-root') || document.body;
@@ -1135,9 +1187,7 @@ function abrirModalTransferir(reInput){
 
   const close = () => { alvo.innerHTML = ''; };
   alvo.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
-  alvo.querySelector('.modal-overlay').addEventListener('click', e => {
-    if (e.target === e.currentTarget) close();
-  });
+  alvo.querySelector('.modal-overlay').addEventListener('click', e => { if (e.target === e.currentTarget) close(); });
 
   document.getElementById('btn-confirmar-solic-transf').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
@@ -1148,54 +1198,38 @@ function abrirModalTransferir(reInput){
 
     if (!novaTurmaId){ toast('Selecione a turma de destino.', 'error'); return; }
 
-    btn.disabled = true;
-    btn.textContent = 'Enviando...';
-
+    btn.disabled = true; btn.textContent = 'Enviando...';
     try {
       await criarSolicitacao({
-        re,
-        tipo: 'transferencia',
-        turmaAtualId,
-        turmaAtualNumero: turmaAtual?.numero || null,
-        turmaNovaId: novaTurmaId,
-        turmaNovaNumero: novaTurmaNumero,
-        motivo
+        re, tipo: 'transferencia',
+        turmaAtualId, turmaAtualNumero: turmaAtual?.numero || null,
+        turmaNovaId: novaTurmaId, turmaNovaNumero: novaTurmaNumero, motivo
       });
       toast('Solicitação de transferência enviada. Aguarde aprovação do gestor.', 'success');
       close();
-      await loadMinhasSolicitacoes();
-      await loadLog();
+      await loadMinhasSolicitacoes(); await loadLog();
     } catch (err){
       console.error(err);
       toast('Falha ao enviar: ' + (err.message || err), 'error');
-      btn.disabled = false;
-      btn.textContent = 'Enviar Solicitação';
+      btn.disabled = false; btn.textContent = 'Enviar Solicitação';
     }
   });
 }
 
 /* ============================================================
    SOLICITAR EXCLUSÃO
-   - Mostra a turma atual com o MESMO rótulo padronizado
-     "Turma III - 05/05/2027 - 07/05/2027 - Subten/Sgt"
    ============================================================ */
 async function solicitarExclusao(reInput){
   if (!sb) { toast('Supabase não configurado.', 'error'); return; }
   const re = String(reInput);
   const p = dbPoliciais[re] || {};
 
-  if (!policialMatchesUserCia(p)){
-    toast('Este policial não pertence à sua Cia/Seção.', 'error');
-    return;
-  }
+  if (!policialMatchesUserCia(p)){ toast('Este policial não pertence à sua Cia/Seção.', 'error'); return; }
 
   const jaPendente = dbSolicitacoes.find(s =>
     String(s.re) === re && s.status === 'pendente' && s.tipo === 'exclusao'
   );
-  if (jaPendente){
-    toast('Já existe uma solicitação de exclusão pendente para este RE.', 'error');
-    return;
-  }
+  if (jaPendente){ toast('Já existe uma solicitação de exclusão pendente para este RE.', 'error'); return; }
 
   const aloc = dbAlocacoes.find(a => String(a.re) === re && a.turma_id);
   const mat  = dbMatriculas.find(m => String(m.re) === re && m.status === 'confirmada' && m.aprovacao !== 'reprovada');
@@ -1239,37 +1273,27 @@ async function solicitarExclusao(reInput){
 
   const close = () => { alvo.innerHTML = ''; };
   alvo.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
-  alvo.querySelector('.modal-overlay').addEventListener('click', e => {
-    if (e.target === e.currentTarget) close();
-  });
+  alvo.querySelector('.modal-overlay').addEventListener('click', e => { if (e.target === e.currentTarget) close(); });
 
   document.getElementById('btn-confirmar-solic-excl').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const motivo = document.getElementById('excl-motivo').value.trim();
     if (!motivo){ toast('Informe o motivo da exclusão.', 'error'); return; }
 
-    btn.disabled = true;
-    btn.textContent = 'Enviando...';
-
+    btn.disabled = true; btn.textContent = 'Enviando...';
     try {
       await criarSolicitacao({
-        re,
-        tipo: 'exclusao',
-        turmaAtualId: turmaId,
-        turmaAtualNumero: turmaAtual?.numero || null,
-        turmaNovaId: null,
-        turmaNovaNumero: null,
-        motivo
+        re, tipo: 'exclusao',
+        turmaAtualId: turmaId, turmaAtualNumero: turmaAtual?.numero || null,
+        turmaNovaId: null, turmaNovaNumero: null, motivo
       });
       toast('Solicitação de exclusão enviada. Aguarde aprovação do gestor.', 'success');
       close();
-      await loadMinhasSolicitacoes();
-      await loadLog();
+      await loadMinhasSolicitacoes(); await loadLog();
     } catch (err){
       console.error(err);
       toast('Falha ao enviar: ' + (err.message || err), 'error');
-      btn.disabled = false;
-      btn.textContent = 'Enviar Solicitação';
+      btn.disabled = false; btn.textContent = 'Enviar Solicitação';
     }
   });
 }
@@ -1277,16 +1301,11 @@ async function solicitarExclusao(reInput){
 /* ============================================================
    HELPER: criar solicitação + registrar no log
    ============================================================ */
-async function criarSolicitacao({
-  re, tipo, turmaAtualId, turmaAtualNumero,
-  turmaNovaId, turmaNovaNumero, motivo
-}){
+async function criarSolicitacao({ re, tipo, turmaAtualId, turmaAtualNumero, turmaNovaId, turmaNovaNumero, motivo }){
   if (!currentUser) throw new Error('Faça login primeiro.');
 
   const { data, error } = await sb.from('eap_solicitacoes').insert({
-    ano: currentYear,
-    re: String(re),
-    tipo,
+    ano: currentYear, re: String(re), tipo,
     turma_atual_id: turmaAtualId || null,
     turma_atual_numero: turmaAtualNumero || null,
     turma_nova_id: turmaNovaId || null,
@@ -1302,12 +1321,10 @@ async function criarSolicitacao({
 
   try {
     await sb.rpc('eap_registrar_tentativa', {
-      p_re: String(re),
-      p_ano: currentYear,
+      p_re: String(re), p_ano: currentYear,
       p_acao: tipo === 'transferencia' ? 'solicitacao_transferencia' : 'solicitacao_exclusao',
       p_detalhes: {
-        solicitacao_id: data.id,
-        tipo,
+        solicitacao_id: data.id, tipo,
         turma_atual: turmaAtualNumero || null,
         turma_nova: turmaNovaNumero || null,
         turma_numero: turmaNovaNumero || turmaAtualNumero || null,
@@ -1317,7 +1334,6 @@ async function criarSolicitacao({
   } catch(logErr){
     console.warn('[criarSolicitacao] falha ao registrar log:', logErr);
   }
-
   return data;
 }
 
@@ -1340,7 +1356,6 @@ function renderMinhasSolicitacoes(){
   }
 
   const lista = state.mostrarHistoricoSolic ? dbSolicitacoes : pendentes;
-
   const btnHist = document.getElementById('btn-toggle-historico-solic');
   if (btnHist){
     btnHist.textContent = state.mostrarHistoricoSolic ? 'Ver só pendentes' : 'Ver histórico';
@@ -1377,13 +1392,9 @@ function renderMinhasSolicitacoes(){
         <td class="cell-muted">${fmtDateTime(s.created_at)}</td>
         <td style="text-align:right">
           ${s.status === 'pendente' ? `
-            <button class="btn btn-outline" style="padding:6px 10px;font-size:11px;color:var(--wine-700);border-color:rgba(122,31,43,.4);margin-right:6px" data-sol-cancel="${s.id}" data-re="${s.re}" title="Cancelar Solicitação">
-              Cancelar
-            </button>
+            <button class="btn btn-outline" style="padding:6px 10px;font-size:11px;color:var(--wine-700);border-color:rgba(122,31,43,.4);margin-right:6px" data-sol-cancel="${s.id}" data-re="${s.re}" title="Cancelar Solicitação">Cancelar</button>
           ` : ''}
-          <button class="btn btn-outline" style="padding:6px 10px;font-size:11px" data-sol-view="${s.id}" title="Ver detalhes">
-            Detalhes
-          </button>
+          <button class="btn btn-outline" style="padding:6px 10px;font-size:11px" data-sol-view="${s.id}" title="Ver detalhes">Detalhes</button>
         </td>
       </tr>`;
   }).join('');
@@ -1394,19 +1405,11 @@ function renderMinhasSolicitacoes(){
       mostrarDetalhesSolicitacao(tr.dataset.solId);
     });
   });
-
   tbody.querySelectorAll('[data-sol-view]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      mostrarDetalhesSolicitacao(btn.dataset.solView);
-    });
+    btn.addEventListener('click', (e) => { e.stopPropagation(); mostrarDetalhesSolicitacao(btn.dataset.solView); });
   });
-
   tbody.querySelectorAll('[data-sol-cancel]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      cancelarSolicitacao(btn.dataset.solCancel, btn.dataset.re);
-    });
+    btn.addEventListener('click', (e) => { e.stopPropagation(); cancelarSolicitacao(btn.dataset.solCancel, btn.dataset.re); });
   });
 }
 
@@ -1419,29 +1422,18 @@ async function cancelarSolicitacao(id, re) {
 
   try {
     const { error } = await sb.from('eap_solicitacoes')
-      .update({ status: 'cancelada' })
-      .eq('id', id)
-      .eq('solicitado_por', currentUser.id);
-
+      .update({ status: 'cancelada' }).eq('id', id).eq('solicitado_por', currentUser.id);
     if (error) throw error;
 
     try {
       await sb.rpc('eap_registrar_tentativa', {
-        p_re: String(re),
-        p_ano: currentYear,
-        p_acao: 'solicitacao_cancelada',
-        p_detalhes: {
-          solicitacao_id: id,
-          motivo: 'Cancelada pelo solicitante'
-        }
+        p_re: String(re), p_ano: currentYear, p_acao: 'solicitacao_cancelada',
+        p_detalhes: { solicitacao_id: id, motivo: 'Cancelada pelo solicitante' }
       });
-    } catch(logErr) {
-      console.warn('[cancelarSolicitacao] falha ao registrar log:', logErr);
-    }
+    } catch(logErr) { console.warn('[cancelarSolicitacao] falha ao registrar log:', logErr); }
 
     toast('Solicitação cancelada com sucesso.', 'success');
-    await loadMinhasSolicitacoes();
-    await loadLog();
+    await loadMinhasSolicitacoes(); await loadLog();
   } catch (err) {
     console.error(err);
     toast('Falha ao cancelar: ' + (err.message || err), 'error');
@@ -1461,46 +1453,22 @@ function mostrarDetalhesSolicitacao(id){
   const tipoClass = isTransf ? 'transf' : 'excl';
   const tipoLabel = isTransf ? 'Transferência' : 'Exclusão';
 
-  const initials = (p.nome || '?')
-    .split(' ').filter(Boolean).slice(0, 2)
-    .map(n => n[0]).join('').toUpperCase();
+  const initials = (p.nome || '?').split(' ').filter(Boolean).slice(0, 2).map(n => n[0]).join('').toUpperCase();
 
   let routeHTML = '';
   if (isTransf && s.turma_nova_numero) {
     routeHTML = `
       <div class="sol-detail-route">
-        <div class="sol-detail-turma from">
-          <small>Turma Atual</small>
-          <strong>${escapeHTML(s.turma_atual_numero || '—')}</strong>
-        </div>
-        <div class="sol-detail-arrow">
-          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="5" y1="12" x2="19" y2="12"/>
-            <polyline points="12 5 19 12 12 19"/>
-          </svg>
-        </div>
-        <div class="sol-detail-turma to">
-          <small>Turma Destino</small>
-          <strong>${escapeHTML(s.turma_nova_numero)}</strong>
-        </div>
+        <div class="sol-detail-turma from"><small>Turma Atual</small><strong>${escapeHTML(s.turma_atual_numero || '—')}</strong></div>
+        <div class="sol-detail-arrow"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></div>
+        <div class="sol-detail-turma to"><small>Turma Destino</small><strong>${escapeHTML(s.turma_nova_numero)}</strong></div>
       </div>`;
   } else if (!isTransf) {
     routeHTML = `
       <div class="sol-detail-route">
-        <div class="sol-detail-turma from">
-          <small>Turma Atual</small>
-          <strong>${escapeHTML(s.turma_atual_numero || '—')}</strong>
-        </div>
-        <div class="sol-detail-arrow">
-          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="5" y1="12" x2="19" y2="12"/>
-            <polyline points="12 5 19 12 12 19"/>
-          </svg>
-        </div>
-        <div class="sol-detail-turma" style="border-color:#dc2626;background:linear-gradient(180deg,#fef2f2,#fee2e2)">
-          <small>Destino</small>
-          <strong style="color:#b91c1c;font-size:16px">EXCLUSÃO</strong>
-        </div>
+        <div class="sol-detail-turma from"><small>Turma Atual</small><strong>${escapeHTML(s.turma_atual_numero || '—')}</strong></div>
+        <div class="sol-detail-arrow"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></div>
+        <div class="sol-detail-turma" style="border-color:#dc2626;background:linear-gradient(180deg,#fef2f2,#fee2e2)"><small>Destino</small><strong style="color:#b91c1c;font-size:16px">EXCLUSÃO</strong></div>
       </div>`;
   } else {
     routeHTML = `<div class="sol-detail-text empty">Turma de destino não informada.</div>`;
@@ -1512,22 +1480,15 @@ function mostrarDetalhesSolicitacao(id){
     const decLabel = s.status === 'aprovada' ? 'Solicitação Aprovada' : s.status === 'reprovada' ? 'Solicitação Reprovada' : 'Solicitação Cancelada';
     const decIcon = s.status === 'aprovada'
       ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>'
-      : s.status === 'reprovada'
-      ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>'
       : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>';
-
-    const decDate = s.decidido_em
-      ? fmtDateTime(s.decidido_em)
+    const decDate = s.decidido_em ? fmtDateTime(s.decidido_em)
       : (s.status === 'cancelada' ? fmtDateTime(s.updated_at || s.created_at) : '—');
 
     decisionHTML = `
       <div class="sol-detail-section">
         <div class="sol-detail-label">Decisão do Gestor</div>
         <div class="sol-detail-decision ${decClass}">
-          <div class="sol-detail-decision-head">
-            ${decIcon}
-            ${decLabel}
-          </div>
+          <div class="sol-detail-decision-head">${decIcon} ${decLabel}</div>
           <div class="sol-detail-decision-body">
             <div style="margin-bottom:6px"><strong>Em:</strong> ${decDate}</div>
             <div style="margin-bottom:6px"><strong>Por:</strong> ${escapeHTML(s.decidido_por_email || (s.status === 'cancelada' ? s.solicitado_por_email : '—'))}</div>
@@ -1537,34 +1498,27 @@ function mostrarDetalhesSolicitacao(id){
       </div>`;
   }
 
-  const envioDate = fmtDateTime(s.created_at);
-
   const timelineHTML = `
     <div class="sol-detail-section">
       <div class="sol-detail-label">Histórico</div>
       <div class="sol-detail-timeline">
         <div class="sol-detail-timeline-item done">
-          <div class="sol-detail-timeline-time">${envioDate}</div>
+          <div class="sol-detail-timeline-time">${fmtDateTime(s.created_at)}</div>
           <div class="sol-detail-timeline-text">Solicitação enviada por você</div>
         </div>
         <div class="sol-detail-timeline-item ${
           s.status === 'aprovada' ? 'done'
           : s.status === 'reprovada' ? 'rejected'
-          : s.status === 'cancelada' ? 'rejected'
-          : 'current'
+          : s.status === 'cancelada' ? 'rejected' : 'current'
         }">
           <div class="sol-detail-timeline-time">${
-            s.decidido_em
-              ? fmtDateTime(s.decidido_em)
-              : (s.status === 'cancelada' && s.updated_at
-                ? fmtDateTime(s.updated_at)
-                : 'Aguardando decisão')
+            s.decidido_em ? fmtDateTime(s.decidido_em)
+            : (s.status === 'cancelada' && s.updated_at ? fmtDateTime(s.updated_at) : 'Aguardando decisão')
           }</div>
           <div class="sol-detail-timeline-text">${
             s.status === 'aprovada' ? 'Aprovada pelo gestor'
             : s.status === 'reprovada' ? 'Reprovada pelo gestor'
-            : s.status === 'cancelada' ? 'Cancelada pelo solicitante'
-            : 'Pendente de análise'
+            : s.status === 'cancelada' ? 'Cancelada pelo solicitante' : 'Pendente de análise'
           }</div>
         </div>
       </div>
@@ -1579,7 +1533,6 @@ function mostrarDetalhesSolicitacao(id){
           <button class="modal-close" data-close title="Fechar">✕</button>
         </div>
         <div class="modal-body">
-
           <div class="sol-detail-hero">
             <div class="sol-detail-tags">
               <span class="sol-detail-tag ${tipoClass}">${tipoLabel}</span>
@@ -1590,33 +1543,23 @@ function mostrarDetalhesSolicitacao(id){
               <div class="sol-detail-police-info">
                 <div class="sol-detail-police-name">${escapeHTML(p.nome || '—')}</div>
                 <div class="sol-detail-police-meta">
-                  <span>
-                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                      <rect x="3" y="4" width="18" height="16" rx="2"/>
-                      <line x1="7" y1="9" x2="17" y2="9"/>
-                    </svg>
-                    RE ${escapeHTML(s.re)}${p.dg ? '-' + escapeHTML(p.dg) : ''}
-                  </span>
+                  <span><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="9" x2="17" y2="9"/></svg>RE ${escapeHTML(s.re)}${p.dg ? '-' + escapeHTML(p.dg) : ''}</span>
                   ${p.posto_grad ? `<span>${escapeHTML(p.posto_grad)}</span>` : ''}
                   ${p.cia_secao ? `<span>${escapeHTML(p.cia_secao)}</span>` : ''}
                 </div>
               </div>
             </div>
           </div>
-
           <div class="sol-detail-section">
             <div class="sol-detail-label">Trajeto da Solicitação</div>
             ${routeHTML}
           </div>
-
           <div class="sol-detail-section">
             <div class="sol-detail-label">Motivo Informado</div>
             <div class="sol-detail-text ${s.motivo ? '' : 'empty'}">${escapeHTML(s.motivo || 'Nenhum motivo informado.')}</div>
           </div>
-
           ${decisionHTML}
           ${timelineHTML}
-
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" data-close>Fechar</button>
@@ -1626,9 +1569,7 @@ function mostrarDetalhesSolicitacao(id){
 
   const close = () => { alvo.innerHTML = ''; };
   alvo.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
-  alvo.querySelector('.modal-overlay').addEventListener('click', e => {
-    if (e.target === e.currentTarget) close();
-  });
+  alvo.querySelector('.modal-overlay').addEventListener('click', e => { if (e.target === e.currentTarget) close(); });
 }
 
 /* ============================================================
@@ -1638,12 +1579,15 @@ async function registrarTentativa(re, ano, acao, detalhes = {}){
   if (!sb) return;
   try {
     const { error } = await sb.rpc('eap_registrar_tentativa', {
-      p_re: String(re || ''),
-      p_ano: ano,
-      p_acao: acao,
-      p_detalhes: detalhes
+      p_re: String(re || ''), p_ano: ano, p_acao: acao, p_detalhes: detalhes
     });
-    if (error) console.warn('[log] falha:', error);
+    if (error){
+      if (error.code === 'P0001'){
+        console.debug(`[log] ação "${acao}" já é registrada automaticamente pelo banco — ignorando.`);
+        return;
+      }
+      console.warn('[log] falha:', error);
+    }
   } catch(e){ console.warn('[log] erro:', e); }
 }
 
@@ -1681,9 +1625,7 @@ function renderLog(){
         <td><span class="pill ${meta.cls}">${meta.txt}</span></td>
         <td>${alvo}</td>
         <td class="cell-muted">${escapeHTML(quem)}</td>
-        <td style="text-align:right">
-          <button class="btn btn-outline" style="padding:6px 12px;font-size:12px">Ver</button>
-        </td>
+        <td style="text-align:right"><button class="btn btn-outline" style="padding:6px 12px;font-size:12px">Ver</button></td>
       </tr>`;
   }).join('');
 
@@ -1700,32 +1642,21 @@ function renderLog(){
    ============================================================ */
 function mostrarDetalhesLog(l){
   const meta = ACAO_LABEL[l.acao] || { txt: l.acao || '—', cls: 'pill-blue' };
-  const dt   = fmtDateTime(l.created_at);
-
-  const re   = l.re || '';
+  const dt = fmtDateTime(l.created_at);
+  const re = l.re || '';
   const nome = l.policial_nome || '';
-  const cia  = l.policial_cia || '';
-
-  const initials = nome
-    ? nome.split(' ').filter(Boolean).slice(0, 2).map(n => n[0]).join('').toUpperCase()
-    : '?';
+  const cia = l.policial_cia || '';
+  const initials = nome ? nome.split(' ').filter(Boolean).slice(0, 2).map(n => n[0]).join('').toUpperCase() : '?';
 
   const det = l.detalhes || {};
-  const curtos = {};
-  const longos = {};
-
+  const curtos = {}; const longos = {};
   const ordemPreferencial = ['tipo', 'turma_atual', 'turma_nova'];
 
-  if (!DETALHE_OCULTAR.has('turma_numero')) {
-    DETALHE_OCULTAR.add('turma_numero');
-  }
+  if (!DETALHE_OCULTAR.has('turma_numero')) DETALHE_OCULTAR.add('turma_numero');
 
   ordemPreferencial.forEach(k => {
-    if (det[k] !== undefined && det[k] !== null && det[k] !== '') {
-      curtos[k] = det[k];
-    }
+    if (det[k] !== undefined && det[k] !== null && det[k] !== '') curtos[k] = det[k];
   });
-
   Object.entries(det).forEach(([k, v]) => {
     if (v === null || v === undefined || v === '') return;
     if (DETALHE_OCULTAR.has(k)) return;
@@ -1739,13 +1670,11 @@ function mostrarDetalhesLog(l){
       <div class="lbl">${escapeHTML(rotuloDetalhe(k))}</div>
       <div class="val">${escapeHTML(formatarValorDetalhe(k, v))}</div>
     </div>`).join('');
-
   const longosHTML = Object.entries(longos).map(([k, v]) => `
     <div style="margin-bottom:10px">
       <div class="sol-detail-label" style="margin-bottom:6px">${escapeHTML(rotuloDetalhe(k))}</div>
       <div class="sol-detail-text">${escapeHTML(String(v))}</div>
     </div>`).join('');
-
   const semDetalhes = !curtosHTML && !longosHTML;
 
   const alvo = document.getElementById('modal-root') || document.body;
@@ -1757,12 +1686,9 @@ function mostrarDetalhesLog(l){
           <button class="modal-close" data-close title="Fechar">✕</button>
         </div>
         <div class="modal-body">
-
           <div class="sol-detail-hero">
             <div class="sol-detail-tags">
-              <span class="pill ${meta.cls}" style="font-size:12px;padding:6px 14px;letter-spacing:.4px">
-                ${escapeHTML(meta.txt)}
-              </span>
+              <span class="pill ${meta.cls}" style="font-size:12px;padding:6px 14px;letter-spacing:.4px">${escapeHTML(meta.txt)}</span>
             </div>
             ${nome ? `
               <div class="sol-detail-police">
@@ -1776,31 +1702,19 @@ function mostrarDetalhesLog(l){
                 </div>
               </div>` : ''}
           </div>
-
           <div class="sol-detail-section">
             <div class="sol-detail-label">Informações do Registro</div>
             <div class="sol-detail-info-row">
-              <div class="sol-detail-info-item">
-                <div class="lbl">Data / Hora</div>
-                <div class="val">${dt}</div>
-              </div>
-              <div class="sol-detail-info-item">
-                <div class="lbl">Executado por</div>
-                <div class="val">${escapeHTML(l.feito_por_email || '—')}</div>
-              </div>
+              <div class="sol-detail-info-item"><div class="lbl">Data / Hora</div><div class="val">${dt}</div></div>
+              <div class="sol-detail-info-item"><div class="lbl">Executado por</div><div class="val">${escapeHTML(l.feito_por_email || '—')}</div></div>
             </div>
           </div>
-
           <div class="sol-detail-section">
             <div class="sol-detail-label">Detalhes Adicionais</div>
             ${semDetalhes
               ? `<div class="sol-detail-text empty">Nenhum detalhe adicional registrado.</div>`
-              : `
-                ${curtosHTML ? `<div class="sol-detail-info-row" style="margin-bottom:12px">${curtosHTML}</div>` : ''}
-                ${longosHTML}
-              `}
+              : `${curtosHTML ? `<div class="sol-detail-info-row" style="margin-bottom:12px">${curtosHTML}</div>` : ''}${longosHTML}`}
           </div>
-
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" data-close>Fechar</button>
@@ -1810,19 +1724,14 @@ function mostrarDetalhesLog(l){
 
   const close = () => { alvo.innerHTML = ''; };
   alvo.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
-  alvo.querySelector('.modal-overlay').addEventListener('click', e => {
-    if (e.target === e.currentTarget) close();
-  });
+  alvo.querySelector('.modal-overlay').addEventListener('click', e => { if (e.target === e.currentTarget) close(); });
 }
 
 /* ============================================================
    EXPORTAÇÕES
    ============================================================ */
 function exportarXLSX(){
-  const rows = [[
-    'RE','Dg','Posto/Grad','Nome','Cia/Seção','Turma','Categoria','Status',
-    'Validade IAS','Nota EAD','Conclusão EAD','Observação'
-  ]];
+  const rows = [['RE','Dg','Posto/Grad','Nome','Cia/Seção','Turma','Categoria','Status','Validade IAS','Nota EAD','Conclusão EAD','Observação']];
 
   const matriculasPorRE = new Map();
   dbMatriculas.filter(m => m.status === 'confirmada' && m.aprovacao !== 'reprovada')
@@ -1834,24 +1743,18 @@ function exportarXLSX(){
     const p = dbPoliciais[reVal] || {};
     if (currentUserCia && !policialMatchesUserCia(p)) return;
     vistos.add(reVal);
-
     const turma = dbTurmas.find(t => String(t.id) === String(turmaId));
     if (!turma) return;
-
     const aloc = dbAlocacoes.find(a => String(a.re) === reVal);
-    const badges = calcularStatusBadges(p, turma.data_inicio, aloc);
-    const statusTxt = badges.map(b => b.txt).join(' / ');
-
-    const validadeIAS  = p.validade_ias || '';
-    const notaEAD      = (aloc && aloc.nota_ead) || '';
-    const dataConclEAD = (aloc && aloc.data_conclusao_ead) || '';
-
+    // Validade IAS: usa data de TÉRMINO da turma como referência
+    const badges = calcularStatusBadges(p, turma.data_fim, aloc);
     rows.push([
       reVal, p.dg || '', p.posto_grad || '', p.nome || '', p.cia_secao || '',
-      turma.numero || '', CAT_LABELS[turma.categoria] || turma.categoria, statusTxt,
-      validadeIAS ? fmtDate(validadeIAS) : '',
-      notaEAD,
-      dataConclEAD ? fmtDate(dataConclEAD) : '',
+      turma.numero || '', CAT_LABELS[turma.categoria] || turma.categoria,
+      badges.map(b => b.txt).join(' / '),
+      p.validade_ias ? fmtDate(p.validade_ias) : '',
+      (aloc && aloc.nota_ead) || '',
+      (aloc && aloc.data_conclusao_ead) ? fmtDate(aloc.data_conclusao_ead) : '',
       mat?.observacao || ''
     ]);
   };
@@ -1865,28 +1768,23 @@ function exportarXLSX(){
     .forEach(m => pushRow(String(m.re), m.turma_id, m));
 
   if (rows.length === 1){ toast('Nenhuma matrícula para exportar.', 'error'); return; }
-  downloadXLSX([{ name: `Matriculas ${currentYear}`, rows }],
-    `EAP${currentYear}_Matriculas_${todayStamp()}.xlsx`);
+  downloadXLSX([{ name: `Matriculas ${currentYear}`, rows }], `EAP${currentYear}_Matriculas_${todayStamp()}.xlsx`);
   toast(`${rows.length - 1} matrícula(s) exportada(s).`, 'success');
 }
 
 function exportarLogXLSX(){
   const rows = [['Data/Hora','Ação','RE','Policial','Turma','Usuário','Detalhes']];
-  dbLog
-    .filter(logEntryMatchesUserCia)
-    .forEach(l => {
-      const det = l.detalhes || {};
-      rows.push([
-        fmtDateTime(l.created_at),
-        (ACAO_LABEL[l.acao] || {}).txt || l.acao,
-        l.re || '', l.policial_nome || '', det.turma_numero || '',
-        l.feito_por_email || '',
-        JSON.stringify(det)
-      ]);
-    });
+  dbLog.filter(logEntryMatchesUserCia).forEach(l => {
+    const det = l.detalhes || {};
+    rows.push([
+      fmtDateTime(l.created_at),
+      (ACAO_LABEL[l.acao] || {}).txt || l.acao,
+      l.re || '', l.policial_nome || '', det.turma_numero || '',
+      l.feito_por_email || '', JSON.stringify(det)
+    ]);
+  });
   if (rows.length === 1){ toast('Nenhum log para exportar.', 'error'); return; }
-  downloadXLSX([{ name: `Log Auditoria ${currentYear}`, rows }],
-    `EAP${currentYear}_LogAuditoria_${todayStamp()}.xlsx`);
+  downloadXLSX([{ name: `Log Auditoria ${currentYear}`, rows }], `EAP${currentYear}_LogAuditoria_${todayStamp()}.xlsx`);
   toast(`${rows.length - 1} registro(s) exportado(s).`, 'success');
 }
 
@@ -1917,28 +1815,19 @@ async function entrarNoApp(user){
 
   currentUser = user;
   atualizarCiaBadge();
-
   document.body.classList.add('autenticado');
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('user-email').textContent = user.email || '—';
-
   atualizarBotaoAdmin();
 
   await checarConexao();
-  await loadTurmas();
-  await loadMatriculas();
-  await loadLog();
-  await loadMinhasSolicitacoes();
+  await loadTurmas(); await loadMatriculas(); await loadLog(); await loadMinhasSolicitacoes();
 }
 
 function mostrarLogin(){
-  currentUser = null;
-  currentUserCia = null;
-  dbSolicitacoes = [];
-  stateUsuarios.loaded = false;
-  stateUsuarios.lista = [];
-  atualizarCiaBadge();
-  atualizarBotaoAdmin();
+  currentUser = null; currentUserCia = null; dbSolicitacoes = [];
+  stateUsuarios.loaded = false; stateUsuarios.lista = [];
+  atualizarCiaBadge(); atualizarBotaoAdmin();
 
   const painel = document.getElementById('gestao-usuarios-panel');
   const principal = document.getElementById('conteudo-principal');
@@ -1951,15 +1840,10 @@ function mostrarLogin(){
 }
 
 /* ============================================================
-   GESTÃO DE USUÁRIOS AUTORIZADOS — matriculaeap
+   GESTÃO DE USUÁRIOS
    ============================================================ */
 const ADMIN_EMAIL_MATRICULA = 'dfukuda@policiamilitar.sp.gov.br';
-
-const stateUsuarios = {
-  loaded: false,
-  loading: false,
-  lista: []
-};
+const stateUsuarios = { loaded: false, loading: false, lista: [] };
 
 function isCurrentUserAdmin(){
   return String(currentUser?.email || '').toLowerCase().trim() === ADMIN_EMAIL_MATRICULA;
@@ -1993,8 +1877,7 @@ async function carregarUsuariosAutorizados(){
   if (!sb) return;
   stateUsuarios.loading = true;
   try {
-    const { data, error } = await sb.from('eap_usuarios_autorizados')
-      .select('*').order('concedido_em', { ascending: false });
+    const { data, error } = await sb.from('eap_usuarios_autorizados').select('*').order('concedido_em', { ascending: false });
     if (error) throw error;
     stateUsuarios.lista = data || [];
     stateUsuarios.loaded = true;
@@ -2011,20 +1894,16 @@ async function renderGestaoUsuarios(container){
     container.innerHTML = `<div class="card"><div class="empty">Acesso restrito.</div></div>`;
     return;
   }
-
   if (!stateUsuarios.loaded){
     container.innerHTML = `<div class="card"><div class="empty">Carregando usuários...</div></div>`;
     await carregarUsuariosAutorizados();
   }
 
   const ativos = stateUsuarios.lista.filter(u => u.ativo);
-
   const rows = stateUsuarios.lista.length === 0
     ? '<tr><td colspan="4" class="empty">Nenhum usuário autorizado além do administrador.</td></tr>'
     : stateUsuarios.lista.map(u => {
-        const st = u.ativo
-          ? { txt: 'Ativo', cls: 'pill-green' }
-          : { txt: 'Revogado', cls: 'pill-red' };
+        const st = u.ativo ? { txt: 'Ativo', cls: 'pill-green' } : { txt: 'Revogado', cls: 'pill-red' };
         const dt = u.concedido_em ? fmtDateTime(u.concedido_em) : '—';
         return `
           <tr>
@@ -2051,7 +1930,6 @@ async function renderGestaoUsuarios(container){
         <p>Conceda ou revogue permissões de acesso ao sistema EAP. Apenas <strong>${ADMIN_EMAIL_MATRICULA}</strong> possui acesso permanente.</p>
       </div>
     </div>
-
     <section class="card">
       <h2>Conceder Acesso</h2>
       <p class="sub">Informe o e-mail institucional do usuário que poderá acessar o EAP.</p>
@@ -2065,21 +1943,16 @@ async function renderGestaoUsuarios(container){
         </div>
       </div>
     </section>
-
     <section class="card">
       <h2>Usuários Autorizados <span class="pill pill-blue" style="margin-left:8px">${ativos.length} ativo${ativos.length === 1 ? '' : 's'}</span></h2>
       <p class="sub">A revogação tem efeito imediato em novas tentativas de login.</p>
       <div style="overflow-x:auto">
         <table>
-          <thead><tr>
-            <th>E-mail</th><th>Status</th><th>Concedido em</th>
-            <th style="text-align:right">Ações</th>
-          </tr></thead>
+          <thead><tr><th>E-mail</th><th>Status</th><th>Concedido em</th><th style="text-align:right">Ações</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
     </section>
-
     <section class="card" style="text-align:center">
       <button class="btn btn-outline" id="btn-voltar-gestao">← Voltar para o painel principal</button>
     </section>
@@ -2098,35 +1971,22 @@ function bindUsuariosEvents(container){
       const input = document.getElementById('novo-usuario-email');
       const email = (input.value || '').toLowerCase().trim();
 
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
-        toast('Informe um e-mail válido.', 'error'); return;
-      }
-      if (email === ADMIN_EMAIL_MATRICULA){
-        toast('O administrador já possui acesso permanente.', 'info'); return;
-      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ toast('Informe um e-mail válido.', 'error'); return; }
+      if (email === ADMIN_EMAIL_MATRICULA){ toast('O administrador já possui acesso permanente.', 'info'); return; }
 
       btn.disabled = true; btn.textContent = 'Concedendo...';
       try {
-        const { data: existing } = await sb.from('eap_usuarios_autorizados')
-          .select('id,ativo').eq('email', email).maybeSingle();
-
+        const { data: existing } = await sb.from('eap_usuarios_autorizados').select('id,ativo').eq('email', email).maybeSingle();
         if (existing){
-          if (existing.ativo){
-            toast('Este usuário já possui acesso ativo.', 'info');
-            return;
-          }
+          if (existing.ativo){ toast('Este usuário já possui acesso ativo.', 'info'); return; }
           const { error } = await sb.from('eap_usuarios_autorizados')
-            .update({ ativo: true, concedido_em: new Date().toISOString(),
-                      concedido_por: currentUser?.email, revogado_em: null })
+            .update({ ativo: true, concedido_em: new Date().toISOString(), concedido_por: currentUser?.email, revogado_em: null })
             .eq('id', existing.id);
           if (error) throw error;
         } else {
-          const { error } = await sb.from('eap_usuarios_autorizados').insert({
-            email, concedido_por: currentUser?.email, ativo: true
-          });
+          const { error } = await sb.from('eap_usuarios_autorizados').insert({ email, concedido_por: currentUser?.email, ativo: true });
           if (error) throw error;
         }
-
         toast(`Acesso concedido a ${email}.`, 'success');
         input.value = '';
         stateUsuarios.loaded = false;
@@ -2146,7 +2006,6 @@ function bindUsuariosEvents(container){
       const id = b.dataset.id;
       const usuario = stateUsuarios.lista.find(u => String(u.id) === String(id));
       if (!usuario) return;
-
       const ativar = action === 'reativar';
       if (!confirm(ativar
         ? `Reativar acesso de ${usuario.email}?`
@@ -2157,11 +2016,8 @@ function bindUsuariosEvents(container){
         const payload = ativar
           ? { ativo: true, concedido_em: new Date().toISOString(), revogado_em: null }
           : { ativo: false, revogado_em: new Date().toISOString() };
-
-        const { error } = await sb.from('eap_usuarios_autorizados')
-          .update(payload).eq('id', id);
+        const { error } = await sb.from('eap_usuarios_autorizados').update(payload).eq('id', id);
         if (error) throw error;
-
         toast(ativar ? 'Acesso reativado.' : 'Acesso revogado.', 'success');
         stateUsuarios.loaded = false;
         await renderGestaoUsuarios(container);
@@ -2224,9 +2080,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const cat = tab.dataset.cat;
       if (!cat) return;
       state.catFiltro = cat;
-      document.querySelectorAll('.cat-tab').forEach(t => {
-        t.classList.toggle('active', t.dataset.cat === cat);
-      });
+      document.querySelectorAll('.cat-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === cat));
       renderTurmasComAlunos();
       renderTurmasConcluidas();
     });
@@ -2237,9 +2091,7 @@ document.addEventListener('DOMContentLoaded', () => {
     clearTimeout(__searchDebounce);
     __searchDebounce = setTimeout(() => {
       state.search = e.target.value;
-      renderTurmasComAlunos();
-      renderTurmasConcluidas();
-      renderLog();
+      renderTurmasComAlunos(); renderTurmasConcluidas(); renderLog();
     }, 200);
   });
 
@@ -2269,8 +2121,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const DOMINIO = '@policiamilitar.sp.gov.br';
     let raw = String(document.getElementById('login-email').value || '').trim().toLowerCase();
     const senha = document.getElementById('login-password').value;
-
     let email;
+
     if (raw.includes('@')){
       if (!raw.endsWith(DOMINIO)){
         err.textContent = 'Apenas e-mails ' + DOMINIO + ' são permitidos.';
@@ -2279,25 +2131,14 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       email = raw;
     } else {
-      if (!raw){
-        err.textContent = 'Informe o usuário.';
-        err.className = 'login-error show';
-        return;
-      }
-      if (!/^[a-z0-9._-]+$/.test(raw)){
-        err.textContent = 'Usuário contém caracteres inválidos.';
-        err.className = 'login-error show';
-        return;
-      }
+      if (!raw){ err.textContent = 'Informe o usuário.'; err.className = 'login-error show'; return; }
+      if (!/^[a-z0-9._-]+$/.test(raw)){ err.textContent = 'Usuário contém caracteres inválidos.'; err.className = 'login-error show'; return; }
       email = raw + DOMINIO;
     }
 
-    btn.disabled = true;
-    btn.textContent = 'Entrando...';
+    btn.disabled = true; btn.textContent = 'Entrando...';
     try {
-      const { data, error } = await sb.auth.signInWithPassword({
-        email, password: senha
-      });
+      const { data, error } = await sb.auth.signInWithPassword({ email, password: senha });
       if (error) throw error;
       document.getElementById('login-password').value = '';
       await entrarNoApp(data.user);
@@ -2307,8 +2148,7 @@ document.addEventListener('DOMContentLoaded', () => {
       err.className = 'login-error show';
       document.getElementById('login-password').value = '';
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Entrar';
+      btn.disabled = false; btn.textContent = 'Entrar';
     }
   });
 
@@ -2322,10 +2162,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!sb){ mostrarLogin(); return; }
     try {
       const { data } = await sb.auth.getSession();
-      if (data && data.session && data.session.user){
-        await entrarNoApp(data.session.user);
-        return;
-      }
+      if (data && data.session && data.session.user){ await entrarNoApp(data.session.user); return; }
     } catch(e){ console.warn(e); }
     mostrarLogin();
   })();
