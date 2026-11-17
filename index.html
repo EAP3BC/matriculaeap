@@ -7,15 +7,70 @@
   <link rel="stylesheet" href="style.css">
   <style>
     /* ============================================================
-       Centralização dos cabeçalhos nas tabelas:
-       - Turmas Criadas / Turmas Concluídas (classe .turma-table,
-         renderizadas dinamicamente em matricula.js)
-       - Minhas Solicitações / Log de Auditoria (classe
-         .table-center-head, definidas neste HTML)
+       CENTRALIZAÇÃO DOS CABEÇALHOS
        ============================================================ */
     .turma-table thead th,
     .table-center-head thead th {
       text-align: center !important;
+      vertical-align: middle !important;
+    }
+
+    /* ============================================================
+       CORPO DAS TABELAS
+       - Centralização horizontal e vertical
+       - Sem quebra de texto (nowrap) e sem abreviação (sem ellipsis)
+       - Células se expandem conforme o conteúdo (a tabela alarga)
+       ============================================================ */
+    .turma-table tbody td,
+    .table-center-head tbody td {
+      text-align: center !important;
+      vertical-align: middle !important;
+      white-space: nowrap !important;
+      overflow: visible !important;
+      text-overflow: clip !important;
+      max-width: none !important;
+    }
+
+    /* ============================================================
+       COLUNA "STATUS": pills empilhadas verticalmente e centradas
+       (Regularizar IAS Odonto / Regularizar IAS Médico / Concluir EAD)
+       ============================================================ */
+    .cell-status .status-badges,
+    .status-badges {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .status-badges .pill {
+      white-space: nowrap;
+    }
+
+    /* ============================================================
+       COLUNA "AÇÕES": botões EMPILHADOS VERTICALMENTE
+       - Ocupam a largura do maior botão (coluna encolhe)
+       - Conteúdo de cada botão centralizado
+       - Espaço horizontal liberado para as demais colunas
+       ============================================================ */
+    .turma-table .cell-actions .actions-wrap {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: center;
+      gap: 6px;
+      flex-wrap: nowrap;
+    }
+    .turma-table .cell-actions .btn-action {
+      width: 100%;
+      justify-content: center;
+    }
+
+    /* ============================================================
+       FALLBACK: se o nowrap alargar a tabela, permite rolagem
+       horizontal no corpo da turma (nunca quebra o texto)
+       ============================================================ */
+    .turma-visual-body {
+      overflow-x: auto;
     }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
