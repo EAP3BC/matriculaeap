@@ -411,19 +411,25 @@ function getPendenciasBadge(p, aloc, turma){
 /**
  * Status da linha (Aprovada ou pendências específicas).
  * - Sem pendências → pill verde "Aprovada"
- * - Com pendências → uma pill vermelha por motivo:
- *     "Regularizar IAS Odonto" / "Regularizar IAS Médico" / "Concluir EAD"
+ * - Com pendências → uma pill vermelha por motivo, EMPILHADAS VERTICALMENTE
+ *   e centralizadas (o layout é definido por `.status-badges` no CSS).
+ *   Ordem: "Regularizar IAS Odonto" / "Regularizar IAS Médico" / "Concluir EAD"
  */
 function renderStatusBadge(p, aloc, turma){
   const pendencias = getPendenciasBadge(p, aloc, turma);
 
   if (pendencias.length === 0){
-    return `<span class="pill pill-green" title="Todos os requisitos atendidos">Aprovada</span>`;
+    return `
+      <div class="status-badges">
+        <span class="pill pill-green" title="Todos os requisitos atendidos">Aprovada</span>
+      </div>`;
   }
 
-  return pendencias
+  const pills = pendencias
     .map(txt => `<span class="pill pill-red" title="${escapeHTML(txt)}">${escapeHTML(txt)}</span>`)
-    .join(' ');
+    .join('');
+
+  return `<div class="status-badges">${pills}</div>`;
 }
 
 /**
@@ -1390,7 +1396,7 @@ function renderMinhasSolicitacoes(){
         <td class="cell-muted">${escapeHTML(s.motivo || '—')}</td>
         <td>${statusCell}</td>
         <td class="cell-muted">${fmtDateTime(s.created_at)}</td>
-        <td style="text-align:right">
+                <td>
           ${s.status === 'pendente' ? `
             <button class="btn btn-outline" style="padding:6px 10px;font-size:11px;color:var(--wine-700);border-color:rgba(122,31,43,.4);margin-right:6px" data-sol-cancel="${s.id}" data-re="${s.re}" title="Cancelar Solicitação">Cancelar</button>
           ` : ''}
@@ -1619,13 +1625,13 @@ function renderLog(){
     const alvo = l.re
       ? `${escapeHTML(l.re)}${l.policial_nome ? ' — ' + escapeHTML(l.policial_nome) : ''}${turma ? ` <span class="pill pill-blue" style="font-size:10px">T ${escapeHTML(turma)}</span>` : ''}`
       : '—';
-    return `
+        return `
       <tr data-log-idx="${idx}" style="cursor:pointer" title="Clique para ver detalhes">
         <td class="cell-muted">${dt}</td>
         <td><span class="pill ${meta.cls}">${meta.txt}</span></td>
         <td>${alvo}</td>
         <td class="cell-muted">${escapeHTML(quem)}</td>
-        <td style="text-align:right"><button class="btn btn-outline" style="padding:6px 12px;font-size:12px">Ver</button></td>
+        <td><button class="btn btn-outline" style="padding:6px 12px;font-size:12px">Ver</button></td>
       </tr>`;
   }).join('');
 
